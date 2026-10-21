@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/scformat", "crates/vault", "apps/scpdm", "apps/scpdm-gui"]
+members = ["crates/scformat", "crates/vault", "crates/protocol", "crates/remote", "apps/scpdm", "apps/scpdm-gui", "apps/scpdm-server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,8 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 scformat = { path = "crates/scformat" }
 vault = { path = "crates/vault" }
+protocol = { path = "crates/protocol" }
+remote = { path = "crates/remote" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -20,12 +22,19 @@ sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tempfile = "3"
 dunce = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "persistence"] }
 egui_extras = { version = "0.35", features = ["image"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 rfd = "0.15"
 nucleo-matcher = "0.3"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
+argon2 = "0.5"
+rand = "0.9"
+ureq = { version = "3", features = ["json"] }
+rpassword = "7"
+anyhow = "1"
 egui_kittest = { version = "0.35", features = ["eframe", "wgpu", "snapshot"] }
 
 # Keep builds small: full debug info only for our own crates.

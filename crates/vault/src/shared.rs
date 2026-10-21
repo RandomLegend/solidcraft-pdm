@@ -25,6 +25,14 @@ pub fn is_hash(hash: &str) -> bool {
 }
 
 impl Vault {
+    /// A vault path from elsewhere (a request), checked: `folder/…/name`, no `..` or hidden
+    /// parts; surrounding `/` removed.
+    pub fn relative_path(path: &str) -> Result<String> {
+        let path = path.trim_matches('/');
+        check_path(path)?;
+        Ok(path.to_owned())
+    }
+
     /// Checks a design out to `user`. Checking out again by the same user is fine.
     pub fn lock(&mut self, path: &str, user: &str) -> Result<Lock> {
         let doc = self.document_id(path)?.ok_or_else(|| Error::NotTracked(path.to_owned()))?;

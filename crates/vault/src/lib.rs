@@ -141,6 +141,8 @@ pub struct Vault {
     root: PathBuf,
     db: Connection,
     store: Store,
+    /// Who new versions are by; `None`: the user running the program.
+    author: Option<String>,
 }
 
 impl Vault {
@@ -167,7 +169,7 @@ impl Vault {
         // Readers (the GUI's background scan, the CLI) don't block a writer, and vice versa.
         db.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         migrate(&db)?;
-        Ok(Vault { store: Store::new(pdm.join("objects")), root, db })
+        Ok(Vault { store: Store::new(pdm.join("objects")), root, db, author: None })
     }
 
     /// Opens the vault containing `path` (itself or the nearest folder above with `.pdm`).
@@ -181,6 +183,12 @@ impl Vault {
             dir = d.parent();
         }
         Err(Error::NotAVault(start))
+    }
+
+    /// Who the versions recorded from now on are by (a server records its users); `None`: the
+    /// user running the program.
+    pub fn set_author(&mut self, author: Option<String>) {
+        self.author = author;
     }
 
     pub fn root(&self) -> &Path {
@@ -588,7 +596,7 @@ impl Vault {
             hash: hash.to_owned(),
             size: bytes.len() as u64,
             comment: comment.trim().to_owned(),
-            author: author(),
+            author: self.author.clone().unwrap_or_else(author),
             created_at: now(),
             path: path.to_owned(),
             name: info.as_ref().and_then(|i| i.name.clone()),

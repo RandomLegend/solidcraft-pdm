@@ -497,3 +497,10 @@ fn vaults_from_the_second_schema_get_locks() {
     let mut vault = Vault::open(dir.path()).unwrap();
     assert_eq!(vault.lock(CASE, "anna").unwrap().user, "anna");
 }
+
+#[test]
+fn versions_can_be_by_another_author() {
+    let (_dir, mut vault) = setup();
+    vault.set_author(Some("anna".into()));
+    assert_eq!(vault.check_in(CASE, "").unwrap().author, "anna");
+}
