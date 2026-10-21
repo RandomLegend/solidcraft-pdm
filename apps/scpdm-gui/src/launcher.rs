@@ -1,15 +1,22 @@
-//! Opening designs in SolidCraft and showing files in the file manager.
+//! Opening designs in SolidCraft, other files in their usual program, and showing files in the
+//! file manager.
 //!
-//! `xdg-open` is not used for designs: SolidCraft's AppImage installs a desktop entry
+//! Linux: `xdg-open` is not used for designs. SolidCraft's AppImage installs a desktop entry
 //! (`ai.storyteller.solidcraft.desktop`, `Exec="/path/to/SolidCraft.AppImage" %F`) but no MIME
 //! type for `*.solidcraft`, so `xdg-open` guesses from the contents (a ZIP, or JSON) and opens
 //! whatever handles those. Instead SolidCraft's desktop entry is found the way a launcher finds
 //! it, and its `Exec` line is run.
+//!
+//! Windows: SolidCraft's installer puts `solidcraft.exe` in `Program Files\SolidCraft` and
+//! associates `.solidcraft` with it, so the program is looked for there, and the association
+//! is the fallback.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(not(windows))]
 const DESKTOP_IDS: [&str; 2] = ["ai.storyteller.solidcraft.desktop", "ai.storyteller.solvecraft.desktop"];
+#[cfg(not(windows))]
 const MIME_TYPE: &str = "application/x-solidcraft";
 
 /// How a design gets opened.
@@ -26,7 +33,7 @@ impl Launcher {
     pub fn open(&self, file: &Path) -> std::io::Result<()> {
         let args = expand(&self.command, file);
         let (program, args) = args.split_first().ok_or(std::io::ErrorKind::InvalidInput)?;
-        Command::new(program).args(args).spawn().map(|_| ())
+        spawn(Command::new(program).args(args))
     }
 }
 
@@ -47,10 +54,31 @@ pub fn custom(command: &str) -> Option<Launcher> {
 
 /// SolidCraft as installed: its desktop entry (the AppImage's own, or one from Gear Lever,
 /// AppImageLauncher, appimaged, Flatpak, a package), else `solidcraft` on `PATH`.
+#[cfg(not(windows))]
 pub fn detect() -> Option<Launcher> {
     detect_in(&application_dirs(), std::env::var_os("PATH").as_deref())
 }
 
+/// SolidCraft as installed: `solidcraft.exe` where the installer puts it, else whatever Windows
+/// opens `.solidcraft` files with.
+#[cfg(windows)]
+pub fn detect() -> Option<Launcher> {
+    let roots = ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .chain(std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Programs")));
+    for root in roots {
+        let exe = root.join("SolidCraft").join("solidcraft.exe");
+        if exe.is_file() {
+            let source = exe.display().to_string();
+            return Some(Launcher { command: vec![source.clone()], source });
+        }
+    }
+    Some(Launcher { command: vec!["explorer.exe".into()], source: "the Windows file association".into() })
+}
+
+#[cfg(not(windows))]
 pub(crate) fn detect_in(dirs: &[PathBuf], path_var: Option<&std::ffi::OsStr>) -> Option<Launcher> {
     let mut best: Option<(u8, Launcher)> = None;
     for dir in dirs {
@@ -77,8 +105,28 @@ pub(crate) fn detect_in(dirs: &[PathBuf], path_var: Option<&std::ffi::OsStr>) ->
     })
 }
 
+/// Opens `file` with the system's program for its type (images: the image viewer).
+pub fn open_with_system(file: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let program = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let program = "xdg-open";
+    spawn(Command::new(program).arg(file))
+}
+
+/// Opens Explorer with `file` selected.
+#[cfg(windows)]
+pub fn show_in_folder(file: &Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    // Explorer wants the quotes around the path only, after the comma.
+    spawn(Command::new("explorer.exe").raw_arg(format!("/select,\"{}\"", file.display())))
+}
+
 /// Opens the file manager with `file` selected (FileManager1 over D-Bus: Dolphin, Nautilus,
 /// Nemo…), else opens its folder.
+#[cfg(not(windows))]
 pub fn show_in_folder(file: &Path) -> std::io::Result<()> {
     let selected = Command::new("dbus-send")
         .args([
@@ -97,15 +145,24 @@ pub fn show_in_folder(file: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     let dir = file.parent().unwrap_or(file);
-    Command::new("xdg-open").arg(dir).spawn().map(|_| ())
+    spawn(Command::new("xdg-open").arg(dir))
+}
+
+/// Starts a program without waiting for it; a thread reaps it when it exits.
+fn spawn(command: &mut Command) -> std::io::Result<()> {
+    let mut child = command.spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// 3 for SolidCraft's own desktop ids, else 0.
+#[cfg(not(windows))]
 fn file_rank(file: &Path) -> u8 {
     let id = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if DESKTOP_IDS.contains(&id) { 3 } else { 0 }
 }
 
+#[cfg(not(windows))]
 struct DesktopEntry {
     name: Option<String>,
     exec: Option<String>,
@@ -114,6 +171,7 @@ struct DesktopEntry {
     is_application: bool,
 }
 
+#[cfg(not(windows))]
 impl DesktopEntry {
     /// The `[Desktop Entry]` group (other groups are actions and are skipped).
     fn parse(text: &str) -> Option<Self> {
@@ -162,6 +220,7 @@ impl DesktopEntry {
 }
 
 /// `$XDG_DATA_HOME/applications`, then each of `$XDG_DATA_DIRS`.
+#[cfg(not(windows))]
 fn application_dirs() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
@@ -175,6 +234,7 @@ fn application_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg(not(windows))]
 fn desktop_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -294,6 +354,7 @@ pub(crate) fn expand(command: &[String], file: &Path) -> Vec<String> {
     out
 }
 
+#[cfg(not(windows))]
 fn exists(program: &str, path_var: Option<&std::ffi::OsStr>) -> bool {
     if program.contains('/') {
         return Path::new(program).is_file();
@@ -309,6 +370,7 @@ fn expand_home(path: &str) -> PathBuf {
 }
 
 /// `file://` URI with everything but unreserved characters and `/` percent-encoded.
+#[cfg(not(windows))]
 fn file_uri(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let mut uri = String::from("file://");
@@ -348,6 +410,7 @@ mod tests {
         assert_eq!(expand(&words(&["app", "--file=%f", "100%%"]), file), words(&["app", "--file=/v/a b.solidcraft", "100%"]));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn finds_the_appimage_entry() {
         let dir = tempfile::tempdir().unwrap();
@@ -377,6 +440,7 @@ mod tests {
         assert!(found.source.ends_with("ai.storyteller.solidcraft.desktop"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn a_launcher_entry_with_another_name_is_found_by_its_mime_type() {
         let dir = tempfile::tempdir().unwrap();
@@ -406,6 +470,7 @@ mod tests {
         assert_eq!(custom("  "), None);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn file_uris_are_percent_encoded() {
         assert_eq!(file_uri(Path::new("/home/me/A b/ü.solidcraft")), "file:///home/me/A%20b/%C3%BC.solidcraft");

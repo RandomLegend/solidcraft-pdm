@@ -122,7 +122,7 @@ pub struct Vault {
 impl Vault {
     /// Makes `root` a vault.
     pub fn init(root: impl AsRef<Path>) -> Result<Vault> {
-        let root = root.as_ref().canonicalize()?;
+        let root = canonicalize(root.as_ref())?;
         let pdm = root.join(PDM_DIR);
         if pdm.exists() {
             return Err(Error::AlreadyAVault(root));
@@ -133,7 +133,7 @@ impl Vault {
 
     /// Opens the vault whose root is `root`.
     pub fn open(root: impl AsRef<Path>) -> Result<Vault> {
-        let root = root.as_ref().canonicalize()?;
+        let root = canonicalize(root.as_ref())?;
         let pdm = root.join(PDM_DIR);
         if !pdm.is_dir() {
             return Err(Error::NotAVault(root));
@@ -148,7 +148,7 @@ impl Vault {
 
     /// Opens the vault containing `path` (itself or the nearest folder above with `.pdm`).
     pub fn discover(path: impl AsRef<Path>) -> Result<Vault> {
-        let start = path.as_ref().canonicalize()?;
+        let start = canonicalize(path.as_ref())?;
         let mut dir = Some(start.as_path());
         while let Some(d) = dir {
             if d.join(PDM_DIR).is_dir() {
@@ -173,7 +173,7 @@ impl Vault {
             (Some(d), Some(n)) => (d, n),
             _ => return Err(Error::OutsideVault(abs)),
         };
-        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        let dir = canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         let rel = dir.join(name);
         let rel = rel.strip_prefix(&self.root).map_err(|_| Error::OutsideVault(abs.clone()))?;
         let parts: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
@@ -196,8 +196,7 @@ impl Vault {
         let mut entries = Vec::new();
         let tx = self.db.transaction()?;
         for file in files {
-            let Ok(rel) = file.strip_prefix(&self.root) else { continue };
-            let path = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+            let Some(path) = vault_path(&self.root, &file) else { continue };
             let meta = match fs::metadata(&file) {
                 Ok(m) => m,
                 Err(_) => continue, // vanished during the scan
@@ -373,6 +372,21 @@ impl Vault {
         }
         fs::remove_dir(dir)?;
         Ok(())
+    }
+
+    /// The reference images in the vault, sorted by path.
+    pub fn images(&self) -> Result<Vec<OtherFile>> {
+        let mut files = Vec::new();
+        find_files(&self.root, &is_image, &mut files)?;
+        let mut out: Vec<OtherFile> = files
+            .into_iter()
+            .filter_map(|file| {
+                let meta = fs::metadata(&file).ok()?; // vanished during the scan
+                Some(OtherFile { path: vault_path(&self.root, &file)?, size: meta.len(), modified: meta.modified().ok() })
+            })
+            .collect();
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
     }
 
     /// Every folder in the vault (also empty ones), as vault paths, sorted.
@@ -625,8 +639,18 @@ pub fn is_design(path: &Path) -> bool {
     matches!(path.extension().and_then(|e| e.to_str()), Some("solidcraft" | "solvecraft"))
 }
 
+/// Whether `path` names a reference image (PNG, JPEG or WebP; any letter case).
+pub fn is_image(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
+}
+
 /// Every design file below `dir`, skipping hidden files and folders (including `.pdm`).
 pub fn find_designs(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    find_files(dir, &is_design, out)
+}
+
+fn find_files(dir: &Path, wanted: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if entry.file_name().to_string_lossy().starts_with('.') {
@@ -634,12 +658,20 @@ pub fn find_designs(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         }
         let path = entry.path();
         if entry.file_type()?.is_dir() {
-            find_designs(&path, out)?;
-        } else if is_design(&path) {
+            find_files(&path, wanted, out)?;
+        } else if wanted(&path) {
             out.push(path);
         }
     }
     Ok(())
+}
+
+/// A file in the vault that is shown but not versioned (a reference image).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OtherFile {
+    pub path: String,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
 }
 
 /// Folders below the vault root that contain designs (for a folder tree), sorted.
@@ -657,6 +689,18 @@ pub fn design_folders(entries: &[Entry]) -> Vec<String> {
     let mut v: Vec<_> = set.into_iter().collect();
     v.sort();
     v
+}
+
+/// The absolute path without symlinks; on Windows without the `\\?\` prefix where possible,
+/// which some programs do not accept.
+fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+    dunce::canonicalize(path)
+}
+
+/// The vault path (`/` separated) of an absolute path below `root`.
+fn vault_path(root: &Path, file: &Path) -> Option<String> {
+    let rel = file.strip_prefix(root).ok()?;
+    Some(rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"))
 }
 
 fn normalize(path: &Path) -> PathBuf {

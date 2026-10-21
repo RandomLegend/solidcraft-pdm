@@ -26,7 +26,10 @@ cargo run --release -p scpdm -- --help        # command line
   the selected folder; right-click a folder for a subfolder, *Show in file manager* or *Delete*
   (empty folders only). Drag designs onto a folder, or use *Move to* in a design's right-click
   menu, to move them with their history.
-- **Middle:** the search bar (Ctrl+F, Esc clears) searches the whole vault, whatever folder is
+- **Middle:** designs, and in folder views also the folder's reference images (PNG, JPEG,
+  WebP): shown with a thumbnail, opened in your image viewer on double-click, moved like
+  designs, but not versioned. Right-click a row, or below the list, for *New design here…*.
+  The search bar (Ctrl+F, Esc clears) searches the whole vault, whatever folder is
   selected: fuzzy and ranked, each word matched within the file name, design name, part number,
   description, project or folder, with the matched letters highlighted. The slider sets the
   thumbnail size.
@@ -36,7 +39,7 @@ cargo run --release -p scpdm -- --help        # command line
 - **Top:** *+ New design* creates an empty design (name, folder, optional part number and
   description), checks it in as v1 and opens it in SolidCraft. *View* chooses the list columns
   (also by right-clicking the list header) and the interface size (also Ctrl + / Ctrl - /
-  Ctrl 0; more presets in Vault > Settings).
+  Ctrl 0; more presets in Vault > Settings). The interface starts at 150 %.
 - **Double-click** a design, its preview or the working version in the history to open it in
   SolidCraft; an older version opens as a read-only copy (to work on it, restore it first).
 
@@ -77,6 +80,7 @@ scpdm ls [dir] / info <file> / thumb <file> <out.png>
 | `crates/vault` | The vault: SQLite index (`.pdm/vault.db`) and content-addressed store (`.pdm/objects/`) |
 | `apps/scpdm` | Command-line tool |
 | `apps/scpdm-gui` | Desktop app (egui), binary `solidcraft-pdm` |
+| `docs/windows.md` | Building for Windows 10 / 11, and what differs there |
 
 Tests: `cargo test --workspace`. The GUI test drives the real window over a demo vault;
 `SCPDM_SCREENSHOTS=<dir> cargo test -p scpdm-gui --test ui` also saves screenshots there.
@@ -107,5 +111,5 @@ Tests: `cargo test --workspace`. The GUI test drives the real window over a demo
 4. Update links in other designs when a linked file is moved or renamed
 5. Compare two versions (properties, parameters, features)
 6. Lifecycle states (WIP → released) and a revision scheme; edit design properties
-7. Upgrade egui (0.33 → current), packaging (`.desktop` file, AppImage)
+7. Upgrade egui (0.33 → current), packaging (`.desktop` file, AppImage; Windows: first build, icon, installer, CI — see `docs/windows.md`)
 8. Multi-user: check-out / locking, a shared vault

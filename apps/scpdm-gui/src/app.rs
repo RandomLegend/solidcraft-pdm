@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use vault::{Entry, Status, Vault, Version};
 
 use crate::launcher::{self, Launcher};
-use crate::scan::{self, Info, Scan};
+use crate::scan::{self, ImageFile, Info, Scan};
 use crate::search::{Haystack, Search};
 
 /// How often the vault is rescanned while the window has focus (cheap: unchanged files are
@@ -39,7 +39,8 @@ struct Settings {
     thumb_width: f32,
     /// List columns the user switched off.
     hidden_columns: Vec<ListColumn>,
-    /// Interface size (egui zoom factor; Ctrl + and Ctrl - change it too).
+    /// Interface size (egui zoom factor; Ctrl + and Ctrl - change it too). 150 % by default:
+    /// egui's 100 % is small on large or high-resolution screens.
     zoom: f32,
 }
 
@@ -51,7 +52,7 @@ impl Default for Settings {
             open_command: String::new(),
             thumb_width: 160.0,
             hidden_columns: Vec::new(),
-            zoom: 1.0,
+            zoom: 1.5,
         }
     }
 }
@@ -114,9 +115,17 @@ enum View {
 /// A design being dragged onto a folder.
 struct DraggedDesign(String);
 
-/// A row of the list: an index into `entries`, and the file name's letters that matched the search.
+/// What a row of the list shows: a design (index into `entries`) or a reference image (index
+/// into `images`).
+#[derive(Clone, Copy, PartialEq)]
+enum Item {
+    Design(usize),
+    Image(usize),
+}
+
+/// A row of the list, and the file name's letters that matched the search.
 struct Row {
-    index: usize,
+    item: Item,
     matches: Vec<usize>,
 }
 
@@ -154,6 +163,8 @@ enum Action {
     ShowFolder(String),
     MoveToFolder { path: String, folder: String },
     ToggleColumn(ListColumn),
+    /// Opens a file (a reference image) with the system's program for it.
+    OpenFile(String),
     /// Opens a version: the working file when it has that content, else a read-only copy.
     OpenVersion { path: String, version: Version },
     AskNewDesign(String),
@@ -170,6 +181,9 @@ pub struct App {
     thumbs: HashMap<String, Option<Arc<[u8]>>>,
     /// Every folder of the vault, also empty ones.
     folders: Vec<String>,
+    /// Reference images, and their sizes in pixels by thumbnail key.
+    images: Vec<ImageFile>,
+    image_sizes: HashMap<String, (u32, u32)>,
     scan: Option<Receiver<Result<Scan, String>>>,
     rescan: bool,
     last_scan: Instant,
@@ -193,7 +207,11 @@ impl App {
     pub fn new(cc: &eframe::CreationContext, start: Option<PathBuf>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let settings: Settings = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
-        cc.egui_ctx.set_zoom_factor(settings.zoom.clamp(0.5, 3.0));
+        // Only with settings storage, which the app always has (even on the first run); tests
+        // have none and lay out at 100 %.
+        if cc.storage.is_some() {
+            cc.egui_ctx.set_zoom_factor(settings.zoom.clamp(0.5, 3.0));
+        }
         let mut app = App {
             settings,
             vault: None,
@@ -201,6 +219,8 @@ impl App {
             infos: HashMap::new(),
             thumbs: HashMap::new(),
             folders: Vec::new(),
+            images: Vec::new(),
+            image_sizes: HashMap::new(),
             scan: None,
             rescan: false,
             last_scan: Instant::now(),
@@ -267,6 +287,8 @@ impl App {
                 self.infos.clear();
                 self.thumbs.clear();
                 self.folders.clear();
+                self.images.clear();
+                self.image_sizes.clear();
                 self.rows_for = None;
                 self.scan = None;
                 self.view = View::All;
@@ -287,7 +309,7 @@ impl App {
             self.rescan = true;
             return;
         }
-        let known = self.infos.keys().cloned().collect();
+        let known = self.infos.keys().chain(self.image_sizes.keys()).cloned().collect();
         self.scan = Some(scan::spawn(vault.root().to_path_buf(), known, ctx.clone()));
     }
 
@@ -304,10 +326,22 @@ impl App {
                 }
                 let live: HashSet<&str> = scan.entries.iter().filter_map(|e| e.hash.as_deref()).collect();
                 self.infos.retain(|h, _| live.contains(h.as_str()));
+                for (key, thumb) in scan.image_thumbs {
+                    if let Some(t) = &thumb {
+                        self.image_sizes.insert(key.clone(), (t.width, t.height));
+                    } else {
+                        self.image_sizes.insert(key.clone(), (0, 0));
+                    }
+                    self.thumbs.insert(key, thumb.map(|t| t.png));
+                }
+                let live_images: HashSet<&str> = scan.images.iter().map(|i| i.key.as_str()).collect();
+                self.image_sizes.retain(|k, _| live_images.contains(k.as_str()));
+                self.thumbs.retain(|k, _| !k.starts_with("img:") || live_images.contains(k.as_str()));
                 self.entries = scan.entries;
                 self.folders = scan.folders;
+                self.images = scan.images;
                 self.rows_for = None;
-                if self.selected.as_ref().is_some_and(|s| !self.entries.iter().any(|e| &e.path == s)) {
+                if self.selected.as_ref().is_some_and(|s| self.entry(s).is_none() && self.image_file(s).is_none()) {
                     self.selected = None;
                 }
                 self.load_history();
@@ -328,6 +362,17 @@ impl App {
 
     fn entry(&self, path: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.path == path)
+    }
+
+    fn image_file(&self, path: &str) -> Option<&ImageFile> {
+        self.images.iter().find(|i| i.file.path == path)
+    }
+
+    fn item_path(&self, item: Item) -> &str {
+        match item {
+            Item::Design(i) => &self.entries[i].path,
+            Item::Image(i) => &self.images[i].file.path,
+        }
     }
 
     fn info(&self, entry: &Entry) -> Option<&scformat::DesignInfo> {
@@ -363,50 +408,66 @@ impl App {
         if self.rows_for.as_ref() == Some(&key) {
             return;
         }
+        let designs = (0..self.entries.len()).map(Item::Design);
+        let images = (0..self.images.len()).map(Item::Image);
         self.rows = match Search::new(&self.search) {
             Some(mut search) => {
-                let mut hits: Vec<(u32, Row)> = (0..self.entries.len())
-                    .filter_map(|index| {
-                        let e = &self.entries[index];
-                        let (folder, file_name) = e.path.rsplit_once('/').unwrap_or(("", &e.path));
-                        let info = self.info(e);
-                        let latest = e.latest.as_ref();
+                let mut hits: Vec<(u32, Row)> = designs
+                    .chain(images)
+                    .filter_map(|item| {
+                        let path = self.item_path(item);
+                        let (folder, file_name) = path.rsplit_once('/').unwrap_or(("", path));
                         let mut fields = vec![folder];
-                        match info {
-                            Some(i) => {
-                                let m = &i.metadata;
-                                fields.extend(
-                                    [&i.name, &m.part_number, &m.description, &m.project, &m.revision]
+                        if let Item::Design(index) = item {
+                            let e = &self.entries[index];
+                            let latest = e.latest.as_ref();
+                            match self.info(e) {
+                                Some(i) => {
+                                    let m = &i.metadata;
+                                    fields.extend(
+                                        [&i.name, &m.part_number, &m.description, &m.project, &m.revision]
+                                            .into_iter()
+                                            .flatten()
+                                            .map(String::as_str),
+                                    );
+                                }
+                                None => fields.extend(
+                                    [latest.and_then(|v| v.name.as_deref()), latest.and_then(|v| v.part_number.as_deref())]
                                         .into_iter()
-                                        .flatten()
-                                        .map(String::as_str),
-                                );
+                                        .flatten(),
+                                ),
                             }
-                            None => fields.extend(
-                                [latest.and_then(|v| v.name.as_deref()), latest.and_then(|v| v.part_number.as_deref())]
-                                    .into_iter()
-                                    .flatten(),
-                            ),
                         }
                         let hit = search.score(&Haystack { file_name, fields })?;
-                        Some((hit.score, Row { index, matches: hit.file_name_matches }))
+                        Some((hit.score, Row { item, matches: hit.file_name_matches }))
                     })
                     .collect();
-                hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| self.entries[a.1.index].path.cmp(&self.entries[b.1.index].path)));
+                hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| self.item_path(a.1.item).cmp(self.item_path(b.1.item))));
                 hits.into_iter().map(|(_, row)| row).collect()
             }
-            None => (0..self.entries.len())
-                .filter(|&i| {
-                    let e = &self.entries[i];
-                    match &self.view {
-                        View::All => true,
-                        View::Status(s) => e.status == *s,
-                        View::TopLevel => !e.path.contains('/'),
-                        View::Folder(f) => e.path.starts_with(&format!("{f}/")),
-                    }
-                })
-                .map(|index| Row { index, matches: Vec::new() })
-                .collect(),
+            None => {
+                // Reference images show in the folders, next to their designs.
+                let in_folder = |path: &str| match &self.view {
+                    View::TopLevel => !path.contains('/'),
+                    View::Folder(f) => path.starts_with(&format!("{f}/")),
+                    _ => false,
+                };
+                let mut rows: Vec<Row> = designs
+                    .filter(|&item| {
+                        let Item::Design(i) = item else { return false };
+                        let e = &self.entries[i];
+                        match &self.view {
+                            View::All => true,
+                            View::Status(s) => e.status == *s,
+                            _ => in_folder(&e.path),
+                        }
+                    })
+                    .chain(images.filter(|&item| in_folder(self.item_path(item))))
+                    .map(|item| Row { item, matches: Vec::new() })
+                    .collect();
+                rows.sort_by(|a, b| self.item_path(a.item).cmp(self.item_path(b.item)));
+                rows
+            }
         };
         self.rows_for = Some(key);
     }
@@ -510,7 +571,7 @@ impl App {
             }
             Action::Rename { from, to } => {
                 let Some(vault) = &mut self.vault else { return };
-                let to = to.trim().trim_matches('/').to_owned();
+                let to = typed_path(&to);
                 match vault.rename(&from, &to) {
                     Ok(()) => {
                         self.info_msg(format!("Moved {from} to {to}"));
@@ -578,6 +639,12 @@ impl App {
                         self.start_scan(ctx);
                     }
                     Err(e) => self.error(e),
+                }
+            }
+            Action::OpenFile(path) => {
+                let Some(vault) = &self.vault else { return };
+                if let Err(e) = launcher::open_with_system(&vault.absolute(&path)) {
+                    self.error(format!("Could not open {path}: {e}"));
                 }
             }
             Action::ToggleColumn(column) => {
@@ -885,7 +952,7 @@ impl App {
         let n = self.entries.iter().filter(|e| e.path.starts_with(&prefix)).count();
         let response = ui.selectable_value(view, View::Folder(folder.to_owned()), format!("{name}  ({n})"));
         drop_target(ui, &response, folder, actions);
-        let empty = n == 0 && !children.contains_key(folder);
+        let empty = n == 0 && !children.contains_key(folder) && !self.images.iter().any(|i| i.file.path.starts_with(&prefix));
         response.context_menu(|ui| {
             if ui.button("New design here…").clicked() {
                 actions.push(Action::AskNewDesign(folder.to_owned()));
@@ -937,33 +1004,51 @@ impl App {
         });
     }
 
+    /// The folder new designs go into from the list: the one shown ("" for the top level).
+    fn current_folder(&self) -> String {
+        match &self.view {
+            View::Folder(f) => f.clone(),
+            _ => String::new(),
+        }
+    }
+
     fn list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         self.search_bar(ui);
         self.refilter();
         let searching = !self.search.trim().is_empty();
         if searching {
             let n = self.rows.len();
-            let noun = if n == 1 { "design" } else { "designs" };
-            ui.label(RichText::new(format!("{n} matching {noun} in the whole vault")).small().weak());
+            let noun = if n == 1 { "match" } else { "matches" };
+            ui.label(RichText::new(format!("{n} {noun} in the whole vault")).small().weak());
         }
         ui.add_space(4.0);
+        let here = self.current_folder();
         if self.rows.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.weak(if searching {
-                    "Nothing matches".to_owned()
-                } else if self.entries.is_empty() {
-                    if self.scan.is_some() { "Scanning…" } else { "No .solidcraft files in this vault yet" }.to_owned()
-                } else {
-                    "No designs here. Drag designs onto a folder on the left to move them.".to_owned()
-                });
-            });
+            let response = ui
+                .centered_and_justified(|ui| {
+                    ui.weak(if searching {
+                        "Nothing matches".to_owned()
+                    } else if self.entries.is_empty() && self.scan.is_some() {
+                        "Scanning…".to_owned()
+                    } else {
+                        "No designs here. Right-click for a new design, or drag designs onto a folder on the left.".to_owned()
+                    });
+                })
+                .response
+                .interact(egui::Sense::click());
+            response.context_menu(|ui| new_here_menu(ui, &here, actions));
             return;
         }
         // Thumbnails are looked up (and version thumbnails loaded) before the table borrows self.
         let mut thumbs = Vec::with_capacity(self.rows.len());
         for i in 0..self.rows.len() {
-            let e = self.entries[self.rows[i].index].clone();
-            thumbs.push(self.entry_thumb(&e));
+            thumbs.push(match self.rows[i].item {
+                Item::Design(d) => {
+                    let e = self.entries[d].clone();
+                    self.entry_thumb(&e)
+                }
+                Item::Image(m) => self.image(&self.images[m].key),
+            });
         }
         let width = self.settings.thumb_width.clamp(*ROW_THUMB_WIDTHS.start(), *ROW_THUMB_WIDTHS.end());
         let thumb = egui::vec2(width, (width / THUMB_ASPECT).round());
@@ -1010,99 +1095,140 @@ impl App {
                 body.rows(row_height, self.rows.len(), |mut row| {
                     let n = row.index();
                     let r = &self.rows[n];
-                    let e = &self.entries[r.index];
-                    let info = self.info(e);
-                    let latest = e.latest.as_ref();
-                    row.set_selected(self.selected.as_ref() == Some(&e.path));
+                    let path = self.item_path(r.item);
+                    let (folder, file) = path.rsplit_once('/').unwrap_or(("", path));
+                    row.set_selected(self.selected.as_deref() == Some(path));
                     row.col(|ui| {
                         thumbnail(ui, thumbs[n].clone(), thumb, egui::Sense::hover());
                     });
+
+                    // The texts of the row: second line, third line, and each column.
+                    let (sub, description, cells): (Vec<String>, Option<&str>, Vec<RichText>) = match r.item {
+                        Item::Design(d) => {
+                            let e = &self.entries[d];
+                            let info = self.info(e);
+                            let latest = e.latest.as_ref();
+                            let props = info.map(|i| &i.metadata);
+                            let name = info.and_then(|i| i.name.clone()).or_else(|| latest.and_then(|v| v.name.clone()));
+                            let date = if date_in_name { e.modified.map(system_time) } else { None };
+                            let sub = [name, Some(folder.to_owned()), date].into_iter().flatten().collect();
+                            let description = info.and_then(|i| i.metadata.description.as_deref()).filter(|_| show_description);
+                            let cells = columns
+                                .iter()
+                                .map(|c| match c {
+                                    ListColumn::Status => {
+                                        let (label, color) = status_style(e.status);
+                                        RichText::new(label).color(color)
+                                    }
+                                    ListColumn::Version => latest.map_or("-".into(), |v| format!("v{}", v.number)).into(),
+                                    ListColumn::PartNumber => props
+                                        .and_then(|m| m.part_number.clone())
+                                        .or_else(|| latest.and_then(|v| v.part_number.clone()))
+                                        .unwrap_or_else(|| "-".into())
+                                        .into(),
+                                    ListColumn::Revision => props
+                                        .and_then(|m| m.revision.clone())
+                                        .or_else(|| latest.and_then(|v| v.revision.clone()))
+                                        .unwrap_or_else(|| "-".into())
+                                        .into(),
+                                    ListColumn::Modified => e.modified.map_or("-".into(), system_time).into(),
+                                })
+                                .collect();
+                            (sub, description, cells)
+                        }
+                        Item::Image(m) => {
+                            let image = &self.images[m];
+                            let size = self.image_sizes.get(&image.key).filter(|(w, _)| *w > 0).map(|(w, h)| format!("{w} × {h}"));
+                            let date = if date_in_name { image.file.modified.map(system_time) } else { None };
+                            let sub = [Some("Reference image".to_owned()), size, Some(folder.to_owned()), date]
+                                .into_iter()
+                                .flatten()
+                                .collect();
+                            let cells = columns
+                                .iter()
+                                .map(|c| match c {
+                                    ListColumn::Status => RichText::new("Image").weak(),
+                                    ListColumn::Modified => image.file.modified.map_or("-".into(), system_time).into(),
+                                    _ => RichText::new("-").weak(),
+                                })
+                                .collect();
+                            (sub, None, cells)
+                        }
+                    };
                     row.col(|ui| {
-                        let description = info.and_then(|i| i.metadata.description.as_deref()).filter(|_| show_description);
                         let lines = if description.is_some() { 3.0 } else { 2.0 };
                         let block = text_height * (lines + 0.4);
                         ui.vertical(|ui| {
                             ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
-                            let (folder, file) = e.path.rsplit_once('/').unwrap_or(("", &e.path));
                             ui.add(egui::Label::new(highlighted(ui, file, &r.matches)).truncate().selectable(false));
-                            let name = info.and_then(|i| i.name.clone()).or_else(|| latest.and_then(|v| v.name.clone()));
-                            let date = if date_in_name { e.modified.map(system_time) } else { None };
-                            let sub = [name.as_deref().unwrap_or(""), folder, date.as_deref().unwrap_or("")]
-                                .into_iter()
-                                .filter(|s| !s.is_empty())
-                                .collect::<Vec<_>>()
-                                .join("  ·  ");
+                            let sub = sub.iter().filter(|s| !s.is_empty()).map(String::as_str).collect::<Vec<_>>().join("  ·  ");
                             ui.add(egui::Label::new(RichText::new(sub).weak().small()).truncate().selectable(false));
                             if let Some(d) = description {
                                 ui.add(egui::Label::new(RichText::new(d).small()).truncate().selectable(false));
                             }
                         });
                     });
-                    let props = info.map(|i| &i.metadata);
-                    for c in &columns {
+                    for text in cells {
                         row.col(|ui| {
-                            let text: RichText = match c {
-                                ListColumn::Status => {
-                                    let (label, color) = status_style(e.status);
-                                    RichText::new(label).color(color)
-                                }
-                                ListColumn::Version => latest.map_or("-".into(), |v| format!("v{}", v.number)).into(),
-                                ListColumn::PartNumber => props
-                                    .and_then(|m| m.part_number.clone())
-                                    .or_else(|| latest.and_then(|v| v.part_number.clone()))
-                                    .unwrap_or_else(|| "-".into())
-                                    .into(),
-                                ListColumn::Revision => props
-                                    .and_then(|m| m.revision.clone())
-                                    .or_else(|| latest.and_then(|v| v.revision.clone()))
-                                    .unwrap_or_else(|| "-".into())
-                                    .into(),
-                                ListColumn::Modified => e.modified.map_or("-".into(), system_time).into(),
-                            };
                             ui.add(egui::Label::new(text).truncate().selectable(false));
                         });
                     }
+
                     let response = row.response();
-                    let present = e.status != Status::Missing;
+                    let is_image = matches!(r.item, Item::Image(_));
+                    let present = match r.item {
+                        Item::Design(d) => self.entries[d].status != Status::Missing,
+                        Item::Image(_) => true,
+                    };
                     if present {
-                        response.dnd_set_drag_payload(DraggedDesign(e.path.clone()));
+                        response.dnd_set_drag_payload(DraggedDesign(path.to_owned()));
                     }
                     if response.clicked() {
-                        actions.push(Action::Select(e.path.clone()));
+                        actions.push(Action::Select(path.to_owned()));
                     }
                     if response.double_clicked() && present {
-                        actions.push(Action::Open(e.path.clone()));
+                        actions.push(if is_image { Action::OpenFile(path.to_owned()) } else { Action::Open(path.to_owned()) });
                     }
                     response.context_menu(|ui| {
-                        actions.push(Action::Select(e.path.clone()));
-                        if !present {
-                            ui.weak("The file is missing");
-                            return;
-                        }
-                        if ui.button("Open in SolidCraft").clicked() {
-                            actions.push(Action::Open(e.path.clone()));
-                            ui.close();
-                        }
-                        if ui.button("Show in folder").clicked() {
-                            actions.push(Action::ShowInFolder(e.path.clone()));
-                            ui.close();
-                        }
-                        ui.menu_button("Move to", |ui| {
-                            let here = e.path.rsplit_once('/').map_or("", |(d, _)| d);
-                            for folder in std::iter::once("").chain(folders.iter().map(String::as_str)) {
-                                let label = if folder.is_empty() { "Top level" } else { folder };
-                                if ui.add_enabled(folder != here, egui::Button::new(label)).clicked() {
-                                    actions.push(Action::MoveToFolder { path: e.path.clone(), folder: folder.to_owned() });
-                                    ui.close();
-                                }
+                        actions.push(Action::Select(path.to_owned()));
+                        if present {
+                            let open = if is_image { "Open" } else { "Open in SolidCraft" };
+                            if ui.button(open).clicked() {
+                                actions.push(if is_image { Action::OpenFile(path.to_owned()) } else { Action::Open(path.to_owned()) });
+                                ui.close();
                             }
-                        });
+                            if ui.button("Show in folder").clicked() {
+                                actions.push(Action::ShowInFolder(path.to_owned()));
+                                ui.close();
+                            }
+                            ui.menu_button("Move to", |ui| {
+                                for target in std::iter::once("").chain(folders.iter().map(String::as_str)) {
+                                    let label = if target.is_empty() { "Top level" } else { target };
+                                    if ui.add_enabled(target != folder, egui::Button::new(label)).clicked() {
+                                        actions.push(Action::MoveToFolder { path: path.to_owned(), folder: target.to_owned() });
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        } else {
+                            ui.weak("The file is missing");
+                        }
+                        ui.separator();
+                        // In a filter or search the row's own folder; in a folder view, that folder.
+                        new_here_menu(ui, folder, actions);
                     });
                 });
             });
+        // Right-click below the list.
+        let rest = ui.allocate_response(ui.available_size().max(egui::vec2(0.0, 0.0)), egui::Sense::click());
+        rest.context_menu(|ui| new_here_menu(ui, &here, actions));
     }
 
     fn details(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        if let Some(image) = self.selected.as_deref().and_then(|p| self.image_file(p)).cloned() {
+            self.image_details(ui, &image, actions);
+            return;
+        }
         let Some(entry) = self.selected.as_deref().and_then(|p| self.entry(p)).cloned() else {
             ui.centered_and_justified(|ui| {
                 ui.weak("Select a design to see its properties and history");
@@ -1228,6 +1354,57 @@ impl App {
         });
     }
 
+    fn image_details(&mut self, ui: &mut egui::Ui, image: &ImageFile, actions: &mut Vec<Action>) {
+        let path = image.file.path.clone();
+        let file = path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f).to_owned();
+        let picture = self.image(&image.key);
+        let pixels = self.image_sizes.get(&image.key).copied().filter(|(w, _)| *w > 0);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            ui.add_space(6.0);
+            let width = ui.available_width();
+            let height = match pixels {
+                Some((w, h)) => (width * h as f32 / w as f32).min(360.0),
+                None => width / THUMB_ASPECT,
+            };
+            let preview = thumbnail(ui, picture, egui::vec2(width, height), egui::Sense::click());
+            if preview.on_hover_text("Double-click to open").double_clicked() {
+                actions.push(Action::OpenFile(path.clone()));
+            }
+            ui.add_space(6.0);
+            ui.heading(&file);
+            ui.weak(&path);
+            ui.label(RichText::new("Reference image (shown, not versioned)").weak());
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Open").clicked() {
+                    actions.push(Action::OpenFile(path.clone()));
+                }
+                if ui.button("Show in folder").clicked() {
+                    actions.push(Action::ShowInFolder(path.clone()));
+                }
+                if ui.button("Move / rename…").clicked() {
+                    self.dialog = Some(Dialog::Rename { from: path.clone(), to: path.clone() });
+                }
+            });
+            ui.add_space(10.0);
+            egui::Grid::new("image-properties").num_columns(2).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+                let mut row = |label: &str, value: Option<String>| {
+                    if let Some(v) = value {
+                        ui.weak(label);
+                        ui.label(v);
+                        ui.end_row();
+                    }
+                };
+                row("Dimensions", pixels.map(|(w, h)| format!("{w} × {h} px")));
+                row("Size", Some(human_size(image.file.size)));
+                row("Modified", image.file.modified.map(system_time));
+            });
+            if pixels.is_none() {
+                ui.label(RichText::new("This image could not be read.").color(ui.visuals().warn_fg_color));
+            }
+        });
+    }
+
     fn link_row(&self, ui: &mut egui::Ui, component: &str, shown: &str, target: Option<String>, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
             ui.weak(format!("{component}:"));
@@ -1272,6 +1449,7 @@ impl App {
         if is_working {
             frame = frame.stroke(egui::Stroke::new(1.5, ui.visuals().selection.stroke.color));
         }
+        let mut buttons_top = f32::INFINITY;
         let shown = frame.show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -1304,7 +1482,7 @@ impl App {
                     if !props.is_empty() {
                         ui.label(RichText::new(props.join(" · ")).small().weak());
                     }
-                    ui.horizontal(|ui| {
+                    let buttons = ui.horizontal(|ui| {
                         if ui
                             .add_enabled(same == Sameness::Different, egui::Button::new("Restore…").small())
                             .on_hover_text("Put this version back into the working file")
@@ -1317,11 +1495,15 @@ impl App {
                             actions.push(Action::SaveCopy { path: entry.path.clone(), version: v.clone() });
                         }
                     });
+                    buttons_top = buttons.response.rect.top();
                 });
             });
         });
+        // Double-click anywhere above the buttons: an area over the buttons would take their clicks.
+        let mut area = shown.response.rect;
+        area.max.y = area.max.y.min(buttons_top - 2.0);
         let hint = if is_working { "Double-click to open in SolidCraft" } else { "Double-click to open a read-only copy" };
-        let response = shown.response.interact(egui::Sense::click()).on_hover_text(hint);
+        let response = ui.interact(area, ui.id().with(("version", v.number)), egui::Sense::click()).on_hover_text(hint);
         if response.double_clicked() && entry.status != Status::Missing {
             actions.push(Action::OpenVersion { path: entry.path.clone(), version: v.clone() });
         }
@@ -1440,7 +1622,8 @@ impl App {
                     if ui.memory(|m| m.focused().is_none()) {
                         edit.request_focus();
                     }
-                    let trimmed = name.trim().trim_matches('/');
+                    let typed = typed_path(name);
+                    let trimmed = typed.as_str();
                     let target = if parent.is_empty() { trimmed.to_owned() } else { format!("{parent}/{trimmed}") };
                     let exists = self.folders.contains(&target);
                     if exists {
@@ -1484,7 +1667,7 @@ impl App {
                         ui.add(egui::TextEdit::singleline(description).hint_text("optional").desired_width(260.0));
                         ui.end_row();
                     });
-                    let stem = name.trim().trim_end_matches(".solidcraft").to_owned();
+                    let stem = typed_path(name).trim_end_matches(".solidcraft").to_owned();
                     let file = format!("{stem}.solidcraft");
                     let path = if folder.is_empty() { file.clone() } else { format!("{folder}/{file}") };
                     let valid = !stem.is_empty() && !stem.contains('/') && !stem.starts_with('.');
@@ -1701,6 +1884,19 @@ enum Sameness {
     Different,
 }
 
+/// "New design here…" and "New folder here…" for `folder` ("" is the top level).
+fn new_here_menu(ui: &mut egui::Ui, folder: &str, actions: &mut Vec<Action>) {
+    let place = if folder.is_empty() { "the top level".to_owned() } else { folder.to_owned() };
+    if ui.button("New design here…").on_hover_text(format!("In {place}")).clicked() {
+        actions.push(Action::AskNewDesign(folder.to_owned()));
+        ui.close();
+    }
+    if ui.button("New folder here…").on_hover_text(format!("In {place}")).clicked() {
+        actions.push(Action::AskNewFolder(folder.to_owned()));
+        ui.close();
+    }
+}
+
 /// Checkboxes for the list's optional columns.
 fn column_toggles(ui: &mut egui::Ui, hidden: &[ListColumn], actions: &mut Vec<Action>) {
     for column in ListColumn::ALL {
@@ -1718,6 +1914,12 @@ fn status_style(status: Status) -> (&'static str, Color32) {
         Status::Untracked => ("Untracked", Color32::from_rgb(120, 145, 185)),
         Status::Missing => ("Missing", Color32::from_rgb(215, 75, 75)),
     }
+}
+
+/// A path as typed in a dialog: trimmed, `\` (as on Windows) read as `/`, no leading or
+/// trailing `/`.
+fn typed_path(text: &str) -> String {
+    text.trim().replace('\\', "/").trim_matches('/').to_owned()
 }
 
 /// The vault path a link stored in `from` points to (`None` when it leaves the vault).
@@ -1796,6 +1998,12 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::resolve_link;
+
+    #[test]
+    fn typed_paths_accept_windows_separators() {
+        assert_eq!(super::typed_path("  archive\\2026\\ "), "archive/2026");
+        assert_eq!(super::typed_path("/parts/bracket.solidcraft/"), "parts/bracket.solidcraft");
+    }
 
     #[test]
     fn links_resolve_relative_to_the_linking_design() {

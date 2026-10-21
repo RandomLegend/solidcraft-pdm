@@ -2,6 +2,9 @@
 //!
 //! `solidcraft-pdm [folder]` opens the vault containing `folder`, else the last one used.
 
+// A window app on Windows: no console window next to it.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use scpdm_gui::app;
 
 fn main() -> eframe::Result {

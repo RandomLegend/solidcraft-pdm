@@ -202,3 +202,17 @@ fn new_designs_are_added_as_v1_and_never_overwrite() {
     assert_eq!(fs::read_to_string(dir.path().join(CASE)).unwrap(), design("P-1", 1), "untouched");
     assert!(matches!(vault.add_new("../x.solidcraft", b"{}", ""), Err(Error::InvalidPath(_))));
 }
+
+#[test]
+fn reference_images_are_listed_but_not_versioned() {
+    let (dir, mut vault) = setup();
+    fs::write(dir.path().join("enclosure/case-ref.JPG"), b"jpeg").unwrap();
+    fs::write(dir.path().join("sketch.webp"), b"webp").unwrap();
+    fs::write(dir.path().join("enclosure/notes.pdf"), b"pdf").unwrap();
+    let images: Vec<String> = vault.images().unwrap().into_iter().map(|i| i.path).collect();
+    assert_eq!(images, ["enclosure/case-ref.JPG", "sketch.webp"]);
+    assert_eq!(vault.scan().unwrap().len(), 1, "scan lists designs only");
+    // They move like designs.
+    assert_eq!(vault.move_to_folder("sketch.webp", "enclosure").unwrap(), "enclosure/sketch.webp");
+    assert!(dir.path().join("enclosure/sketch.webp").is_file());
+}
