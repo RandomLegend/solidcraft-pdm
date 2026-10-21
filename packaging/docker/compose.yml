@@ -3,6 +3,11 @@
 #   docker compose up -d
 #   docker compose exec pdm scpdm-server user add root --admin
 #
+# Backups (daily by default; schedule and how many to keep on the administration page) go to
+# the volume pdm-backups. Better on another disk or a share: set PDM_BACKUPS to a folder there
+# (it must be writable for the user id 7380: `chown 7380 /mnt/nas/pdm`), or make pdm-backups
+# an SMB or NFS volume (see the end of this file).
+#
 # HTTPS (optional): set PDM_DOMAIN to the server's name (it must reach this machine on ports
 # 80 and 443, for the certificate) and start with the "https" profile:
 #
@@ -21,6 +26,7 @@ services:
       - "${PDM_PORT:-7380}:7380"
     volumes:
       - pdm-data:/data
+      - ${PDM_BACKUPS:-pdm-backups}:/backups
 
   caddy:
     image: caddy:2
@@ -38,3 +44,14 @@ services:
 volumes:
   pdm-data:
   caddy-data:
+  pdm-backups:
+  # On a share instead, for example:
+  #   driver: local
+  #   driver_opts:
+  #     type: cifs
+  #     device: //nas.lan/backups/pdm
+  #     o: username=pdm,password=secret,uid=7380,gid=7380,vers=3.0
+  # or NFS:
+  #     type: nfs
+  #     device: :/export/backups/pdm
+  #     o: addr=nas.lan,rw,nfsvers=4

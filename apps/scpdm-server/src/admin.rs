@@ -47,6 +47,9 @@ pub fn router() -> Router<Shared> {
         .route("/api/admin/users/{name}/access/{vault}", put(set_access))
         .route("/api/admin/vaults", get(vaults).post(add_vault))
         .route("/api/admin/vaults/{vault}/unlock", post(unlock))
+        .route("/api/admin/backups", get(backups))
+        .route("/api/admin/backups/settings", put(backup_settings))
+        .route("/api/admin/backups/run", post(back_up_now))
 }
 
 /// A built-in file, with headers that keep it to itself (no framing, scripts only from here).
@@ -198,6 +201,15 @@ struct Overview {
     per_day: Vec<(i64, u64)>,
     recent: Vec<Activity>,
     checked_out: Vec<CheckOut>,
+    backup: BackupSummary,
+}
+
+/// For the dashboard: whether backups run, and the last one.
+#[derive(Serialize)]
+struct BackupSummary {
+    enabled: bool,
+    last: Option<crate::backup::Run>,
+    last_ok_at: Option<i64>,
 }
 
 fn now() -> i64 {
@@ -257,6 +269,12 @@ async fn overview(State(server): State<Shared>, Admin(..): Admin) -> Reply<axum:
         recent.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         recent.truncate(15);
         checked_out.sort_by(|a, b| a.since.cmp(&b.since));
+        let runs = s.backup_runs(200)?;
+        let backup = BackupSummary {
+            enabled: s.backup_settings()?.enabled && s.backup_target()?.is_some(),
+            last_ok_at: runs.iter().find(|r| r.ok).map(|r| r.finished_at),
+            last: runs.into_iter().next(),
+        };
         Ok(Overview {
             name: s.name.clone(),
             version: env!("CARGO_PKG_VERSION"),
@@ -268,6 +286,7 @@ async fn overview(State(server): State<Shared>, Admin(..): Admin) -> Reply<axum:
             per_day: per_day.into_iter().collect(),
             recent,
             checked_out,
+            backup,
         })
     })
     .await
@@ -415,4 +434,72 @@ async fn unlock(State(server): State<Shared>, Admin(me, _): Admin, Path(vault): 
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct Backups {
+    settings: crate::backup::Settings,
+    /// Where backups go, and whether that was set when starting the server (not here).
+    target: Option<String>,
+    target_fixed: bool,
+    /// Whether that folder is there, and on the data folder's disk.
+    target_exists: bool,
+    same_disk: Option<bool>,
+    running: bool,
+    next_at: Option<i64>,
+    runs_total: u64,
+    runs_ok: u64,
+    last_ok_at: Option<i64>,
+    /// The latest runs, newest first, and the backups in the folder.
+    runs: Vec<crate::backup::Run>,
+    stored: Vec<crate::backup::Stored>,
+    /// The data folder, which a backup replaces when restoring.
+    data: String,
+}
+
+async fn backups(State(server): State<Shared>, Admin(..): Admin) -> Reply<axum::Json<Backups>> {
+    let b = accounts(&server, |s| {
+        let target = s.backup_target()?;
+        let runs = s.backup_runs(50)?;
+        let (runs_total, runs_ok) = s.backup_counts()?;
+        let last_ok_at = s.accounts.with_db(|db| {
+            use rusqlite::OptionalExtension;
+            db.query_row("SELECT MAX(finished_at) FROM backup_runs WHERE ok = 1", [], |r| r.get::<_, Option<i64>>(0)).optional().map(Option::flatten)
+        })?;
+        Ok(Backups {
+            settings: s.backup_settings()?,
+            target_exists: target.as_ref().is_some_and(|t| t.is_dir()),
+            target: target.map(|t| t.display().to_string()),
+            target_fixed: s.backup_target_fixed(),
+            same_disk: s.backup_target_same_disk(),
+            running: s.backup_running(),
+            next_at: s.next_backup()?,
+            runs_total,
+            runs_ok,
+            last_ok_at,
+            runs,
+            stored: s.stored_backups()?,
+            data: s.data.display().to_string(),
+        })
+    })
+    .await?;
+    Ok(axum::Json(b))
+}
+
+async fn backup_settings(State(server): State<Shared>, Admin(..): Admin, axum::Json(settings): axum::Json<crate::backup::Settings>) -> Reply<StatusCode> {
+    accounts(&server, move |s| s.set_backup_settings(&settings)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Starts a backup; the page follows it on `/api/admin/backups`.
+async fn back_up_now(State(server): State<Shared>, Admin(..): Admin) -> Reply<StatusCode> {
+    if server.backup_running() {
+        return Err(fail(StatusCode::CONFLICT, ErrorCode::Conflict, "a backup is running already"));
+    }
+    if server.backup_target()?.is_none() {
+        return Err(fail(StatusCode::BAD_REQUEST, ErrorCode::Invalid, "set the backup folder first"));
+    }
+    let s = server.clone();
+    tokio::task::spawn_blocking(move || s.back_up("page"));
+    Ok(StatusCode::ACCEPTED)
 }

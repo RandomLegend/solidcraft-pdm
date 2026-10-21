@@ -12,6 +12,7 @@
 
 pub mod accounts;
 mod admin;
+pub mod backup;
 mod api;
 
 use std::collections::HashMap;
@@ -30,6 +31,11 @@ pub struct Server {
     vaults: Mutex<HashMap<String, Arc<SharedVault>>>,
     /// When it started (Unix seconds), for the administration page.
     started: i64,
+    /// The backup folder given when starting (`--backup-dir`), which the page cannot change.
+    backup_dir: Option<PathBuf>,
+    backup_busy: std::sync::atomic::AtomicBool,
+    /// Tells the schedule that the settings changed.
+    backup_wake: tokio::sync::Notify,
 }
 
 /// A vault in use: one change at a time; the counter tells clients whether to fetch it again.
@@ -42,6 +48,11 @@ struct SharedVault {
 
 impl Server {
     pub fn open(data: &Path, name: &str) -> anyhow::Result<Arc<Server>> {
+        Self::open_with_backups(data, name, None)
+    }
+
+    /// Like [`Server::open`], with backups going to `backup_dir` (fixed for the page).
+    pub fn open_with_backups(data: &Path, name: &str, backup_dir: Option<PathBuf>) -> anyhow::Result<Arc<Server>> {
         std::fs::create_dir_all(data.join("vaults"))?;
         Ok(Arc::new(Server {
             name: name.to_owned(),
@@ -49,6 +60,9 @@ impl Server {
             accounts: Accounts::open(data)?,
             vaults: Mutex::new(HashMap::new()),
             started: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64),
+            backup_dir,
+            backup_busy: Default::default(),
+            backup_wake: tokio::sync::Notify::new(),
         }))
     }
 
@@ -100,7 +114,10 @@ pub async fn serve(
     listener: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, api::router(server)).with_graceful_shutdown(shutdown).await
+    let schedule = tokio::spawn(backup::schedule(server.clone()));
+    let result = axum::serve(listener, api::router(server)).with_graceful_shutdown(shutdown).await;
+    schedule.abort();
+    result
 }
 
 /// Starts a server on a free local port in a background thread; for tests. Returns its URL.

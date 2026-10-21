@@ -54,10 +54,11 @@ docker compose exec pdm scpdm-server grant anna workshop write
 
 The server listens on port 7380 (`PDM_PORT` changes it); the app connects to
 `http://<this machine>:7380`. Users and vaults are in the volume `pdm-data` (mounted at
-`/data`); back it up with the container stopped (`docker compose stop`). Users and vaults can
-be added while the server runs. Settings, in the environment or a `.env` file next to
-`compose.yml`: `PDM_NAME` (the name the app shows), `PDM_PORT`, `PDM_VERSION` (an image tag
-instead of `latest`). `docker compose pull && docker compose up -d` updates the server.
+`/data`); [backups](#backups) go to the volume `pdm-backups` (`/backups`), daily from the
+start. Users and vaults can be added while the server runs. Settings, in the environment or a
+`.env` file next to `compose.yml`: `PDM_NAME` (the name the app shows), `PDM_PORT`,
+`PDM_VERSION` (an image tag instead of `latest`), `PDM_BACKUPS` (a folder for the backups,
+instead of the volume). `docker compose pull && docker compose up -d` updates the server.
 
 **HTTPS with Caddy:** for a server reachable by a name (it needs ports 80 and 443 for its
 certificate from Let's Encrypt):
@@ -102,14 +103,60 @@ manage them later; `--password-stdin` reads a password from standard input, for 
 settings of `serve` can also come from `$SCPDM_SERVER_LISTEN` and `$SCPDM_SERVER_NAME`.
 
 The data folder holds `server.db` (users, sessions, access) and `vaults/<name>/`, one vault
-each. Back it up as a whole while the server is stopped (or with a file-system snapshot).
-Logins last 30 days; passwords are stored as Argon2 hashes, sessions as hashes of their
+each; for its backups see [Backups](#backups). Logins last 30 days; passwords are stored as Argon2 hashes, sessions as hashes of their
 tokens.
 
 **HTTPS:** the server speaks plain HTTP. On your own network or a VPN that is fine; otherwise
 put a reverse proxy with TLS in front of it (for example Caddy:
 `caddy reverse-proxy --from pdm.example.com --to localhost:7380`). The app warns when a
 password would travel over `http://` to another machine.
+
+## Backups
+
+The server backs itself up: users, access and every vault with all its versions, into another
+folder, on a schedule. Set it up on the administration page under *Backups*: the folder, how
+often (every hour to every week; daily by default), how many backups to keep and, if you like,
+for how many days at most. *Back up now* runs one at once. The page also shows the last good
+backup, when the next one is due, how many runs succeeded and failed (and why), and the
+backups in the folder.
+
+<img src="images/server-backups.png" alt="The Backups page: last and next backup, success rate, settings, runs and the backups in the folder" width="100%">
+
+**Where to:** another disk, or a network share mounted on the server (SMB / CIFS, NFS):
+
+- **As a program:** start it with `--backup-dir /mnt/nas/pdm` (or `SCPDM_BACKUP_DIR`); then
+  the folder is fixed and backups are on from the start. Without it, the folder is set on the
+  page. Mount the share with your system as usual (`/etc/fstab`); the server writes as the user
+  it runs as, so that user must be able to write there (for SMB: `uid=` in the mount options).
+- **With Docker:** backups go to `/backups` in the container: the volume `pdm-backups` in
+  `compose.yml`, or a folder of your choice with `PDM_BACKUPS=/mnt/nas/pdm` (writable for
+  user id 7380: `chown 7380 /mnt/nas/pdm`). `compose.yml` also shows how to make the volume
+  an SMB or NFS share directly.
+
+The page warns when the folder is on the same disk as the data (a failing disk would take both).
+The server never creates the backup folder itself: if a share is not mounted, its mount point
+is missing or empty and the backup fails (and says so) instead of filling the server's own
+disk. Make the folder once, on the mounted share.
+
+**What a backup is:** a folder `pdm-backup-<date and time, UTC>` with a complete data folder
+inside: `server.db`, `vaults/<name>/` and `backup.json` (when, which vaults, how big). It is
+consistent: each vault is held for the moment its database and working files are copied, so
+no check-in is caught half-way, and the databases are copied with SQLite's own backup, first
+to the server's disk and only then to the share (a database is never opened on the share).
+Version files, which never change, are shared with the previous backup as hard links where the
+folder allows it (local disks, NFS, many SMB servers), so a backup of a large vault that barely
+changed takes little room and time; otherwise they are copied. A backup is written as
+`.partial-…` and only renamed when complete; old backups beyond what you keep are deleted, but
+only the server's own `pdm-backup-…` folders, and never the newest.
+
+From a script, `scpdm-server backup` makes a backup at once (with `--data` and `--backup-dir`
+as for `serve`). While the server runs, prefer the page or the schedule: they hold each vault
+while copying it.
+
+**Restoring:** stop the server, move the data folder aside, copy a backup folder in its place
+(`cp -a /mnt/nas/pdm/pdm-backup-20261021T021500.000Z /srv/pdm`), start the server. Workspaces
+catch up on their next refresh; changes made since the backup are still in them and can be
+checked in again. A single vault can be restored the same way: its `vaults/<name>` folder.
 
 ## The administration page
 
@@ -126,6 +173,7 @@ users cannot.
   administrators; access per vault (no access, read, read and change, administer); log a user
   out everywhere; remove a user. Not yourself: your own administrator rights and account stay.
 - **Vaults:** each vault's numbers, and new vaults.
+- **Backups:** see [Backups](#backups).
 
 <img src="images/server-users.png" alt="Users and their access to the vaults" width="100%">
 

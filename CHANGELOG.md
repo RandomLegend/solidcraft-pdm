@@ -3,6 +3,19 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
+## Unreleased
+
+### Server
+
+- Automatic backups of users and every vault to another folder: a second disk, or an SMB or
+  NFS share. Each backup is a complete data folder the server runs from as it is; unchanged
+  version files are hard-linked to the previous backup where the folder allows it. A schedule
+  (every hour to every week), how many to keep and for how long, on the administration page's
+  new *Backups* page, with the runs, their results and the backups in the folder.
+- `--backup-dir` / `SCPDM_BACKUP_DIR` fixes the folder (and switches backups on); in Docker the
+  `/backups` volume. `scpdm-server backup` makes one from a script.
+- See [Backups](docs/server.md#backups) in the server guide, also for restoring.
+
 ## 0.2.1 — 2026-10-21
 
 ### Server

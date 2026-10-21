@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Makes the server's README images in docs/images/ (server-dashboard.png, server-users.png): a
+# Makes the server's README images in docs/images/ (server-dashboard.png, server-users.png,
+# server-backups.png): a
 # demo server with users, vaults and a month of check-ins, made with the real command line,
 # photographed in headless Chromium by docs/server-screenshots.js.
 #
@@ -99,6 +100,17 @@ for user in anna ben dana; do
   curl -fsS -o /dev/null -H 'Content-Type: application/json' -d "{\"user\":\"$user\",\"password\":\"$user-password\"}" "$url/api/login"
 done
 
+# Backups: a few runs, one of them while the share is "not mounted".
+mkdir "$work/backups"
+cookies="$work/cookies"
+admin() { curl -fsS -b "$cookies" -c "$cookies" -H 'X-PDM-Admin: 1' -H 'Content-Type: application/json' "$@" >/dev/null; }
+admin -d '{"user":"admin","password":"admin-password"}' "$url/api/admin/login"
+admin -X PUT -d "{\"enabled\":true,\"interval_hours\":24,\"keep_count\":14,\"keep_days\":90,\"target\":\"$work/backups\"}" "$url/api/admin/backups/settings"
+backup() { admin -X POST "$url/api/admin/backups/run"; sleep 1.5; }
+backup; backup
+mv "$work/backups" "$work/backups-away"; backup; mv "$work/backups-away" "$work/backups"
+backup
+
 mkdir -p "$root/docs/images"
-NODE_PATH="$node_dir/node_modules" node "$root/docs/server-screenshots.js" "$chromium" "$port" "$root/docs/images"
+NODE_PATH="$node_dir/node_modules" node "$root/docs/server-screenshots.js" "$chromium" "$port" "$root/docs/images" "$work"
 ls -la "$root"/docs/images/server-*.png

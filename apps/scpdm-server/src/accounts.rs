@@ -77,6 +77,22 @@ impl Accounts {
                  access  TEXT NOT NULL,
                  PRIMARY KEY (user_id, vault)
              );
+             CREATE TABLE IF NOT EXISTS settings (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS backup_runs (
+                 id          INTEGER PRIMARY KEY,
+                 started_at  INTEGER NOT NULL,
+                 finished_at INTEGER NOT NULL,
+                 ok          INTEGER NOT NULL,
+                 trigger     TEXT NOT NULL,
+                 name        TEXT,
+                 files       INTEGER NOT NULL DEFAULT 0,
+                 bytes       INTEGER NOT NULL DEFAULT 0,
+                 copied      INTEGER NOT NULL DEFAULT 0,
+                 message     TEXT NOT NULL DEFAULT ''
+             );
              PRAGMA foreign_keys = ON;",
         )?;
         let columns: Vec<String> =
@@ -89,6 +105,24 @@ impl Accounts {
 
     fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The database itself, for the server's other tables (`backup`).
+    pub(crate) fn with_db<T>(&self, work: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> anyhow::Result<T> {
+        Ok(work(&self.db())?)
+    }
+
+    pub(crate) fn setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        self.with_db(|db| db.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional())
+    }
+
+    pub(crate) fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        self.with_db(|db| db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", [key, value]).map(drop))
+    }
+
+    /// A consistent copy of `server.db` at `to` (a new file).
+    pub(crate) fn backup_db(&self, to: &Path) -> anyhow::Result<()> {
+        self.with_db(|db| db.execute("VACUUM INTO ?1", [to.to_string_lossy()]).map(drop))
     }
 
     pub fn add_user(&self, name: &str, password: &str, admin: bool) -> anyhow::Result<()> {

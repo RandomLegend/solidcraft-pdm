@@ -12,6 +12,10 @@ struct Cli {
     /// The data folder (users, vaults); also $SCPDM_SERVER_DATA
     #[arg(long, env = "SCPDM_SERVER_DATA", default_value = "pdm-server-data", global = true)]
     data: PathBuf,
+    /// Where backups go: another disk, or a mounted SMB/NFS share (then fixed for the
+    /// administration page); also $SCPDM_BACKUP_DIR
+    #[arg(long, env = "SCPDM_BACKUP_DIR", global = true)]
+    backup_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -41,6 +45,9 @@ enum Command {
     Grant { user: String, vault: String, access: String },
     /// Take a user's access to a vault away
     Revoke { user: String, vault: String },
+    /// Back everything up now, to --backup-dir or the folder set on the administration page
+    /// (while the server runs, "Back up now" on that page is the safer way)
+    Backup,
 }
 
 #[derive(Subcommand)]
@@ -87,7 +94,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Serve { listen, name } => {
-            let server = Server::open(&cli.data, &name)?;
+            let server = Server::open_with_backups(&cli.data, &name, cli.backup_dir.clone())?;
             if server.accounts.users()?.is_empty() {
                 eprintln!("No users yet: add one with `scpdm-server user add NAME --admin`.");
             }
@@ -112,6 +119,11 @@ fn main() -> anyhow::Result<()> {
                 scpdm_server::serve(server, listener, shutdown).await?;
                 anyhow::Ok(())
             })?;
+        }
+        Command::Backup => {
+            let server = Server::open_with_backups(&cli.data, "", cli.backup_dir.clone())?;
+            let run = server.back_up("command line")?;
+            anyhow::ensure!(run.ok, "{}", run.message);
         }
         Command::User { command } => {
             let server = Server::open(&cli.data, "")?;

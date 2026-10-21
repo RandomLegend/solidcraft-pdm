@@ -197,3 +197,36 @@ fn users_and_their_access_are_managed() {
     assert_eq!(s.send(&cookie, "POST", "/api/admin/logout", json!({}), true), 204);
     assert_eq!(s.get(&cookie, "/api/admin/me").0, 401);
 }
+
+#[test]
+fn backups_are_set_up_and_run_from_the_page() {
+    let s = setup();
+    let cookie = cookie_pair(&s.page_login("root", "root-password").1.unwrap());
+    let (status, b) = s.get(&cookie, "/api/admin/backups");
+    assert_eq!(status, 200, "{b}");
+    assert_eq!((b["target"].clone(), b["settings"]["enabled"].as_bool(), b["runs_total"].as_u64()), (Value::Null, Some(false), Some(0)));
+    assert_eq!(s.send(&cookie, "POST", "/api/admin/backups/run", json!({}), true), 400, "no folder yet");
+
+    let target = tempfile::tempdir().unwrap();
+    let settings = json!({"enabled": true, "interval_hours": 6, "keep_count": 5, "keep_days": 30, "target": target.path().display().to_string()});
+    assert_eq!(s.send(&cookie, "PUT", "/api/admin/backups/settings", settings.clone(), false), 403, "needs the header");
+    assert_eq!(s.send(&cookie, "PUT", "/api/admin/backups/settings", json!({"interval_hours": 0, "target": target.path().display().to_string()}), true), 400);
+    assert_eq!(s.send(&cookie, "PUT", "/api/admin/backups/settings", json!({"target": "/no/such/share"}), true), 400);
+    assert_eq!(s.send(&cookie, "PUT", "/api/admin/backups/settings", settings, true), 204);
+
+    assert_eq!(s.send(&cookie, "POST", "/api/admin/backups/run", json!({}), true), 202);
+    let mut b = Value::Null;
+    for _ in 0..200 {
+        b = s.get(&cookie, "/api/admin/backups").1;
+        if b["runs_total"].as_u64() == Some(1) && b["running"] == false {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!((b["runs_ok"].as_u64(), b["runs"][0]["trigger"].as_str()), (Some(1), Some("page")), "{b}");
+    assert_eq!(b["stored"].as_array().unwrap().len(), 1);
+    assert_eq!(b["stored"][0]["vaults"], json!(["workshop"]));
+    assert!(b["next_at"].as_i64().unwrap() > b["runs"][0]["started_at"].as_i64().unwrap() + 5 * 3600, "in six hours");
+    let (_, o) = s.get(&cookie, "/api/admin/overview");
+    assert_eq!((o["backup"]["enabled"].as_bool(), o["backup"]["last"]["ok"].as_bool()), (Some(true), Some(true)));
+}

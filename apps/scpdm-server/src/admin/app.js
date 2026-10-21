@@ -55,7 +55,7 @@ async function api(method, path, body) {
     try { message = (await response.json()).message || message; } catch { /* not JSON */ }
     throw new ApiError(response.status, message);
   }
-  return response.status === 204 || response.status === 201 ? null : response.json();
+  return response.status === 200 ? response.json() : null;
 }
 
 function bytes(n) {
@@ -159,7 +159,7 @@ function showLogin(message) {
 
 // ---- frame ----
 
-const PAGES = { dashboard: ["Dashboard", dashboard], users: ["Users", users], vaults: ["Vaults", vaults] };
+const PAGES = { dashboard: ["Dashboard", dashboard], users: ["Users", users], vaults: ["Vaults", vaults], backups: ["Backups", backups] };
 
 function frame(page, content) {
   const nav = h("nav", { class: "nav" }, Object.entries(PAGES).map(([key, [label]]) =>
@@ -215,6 +215,14 @@ function chart(perDay) {
     h("div", { class: "axis" }, h("span", {}, date(0)), h("span", {}, `most in a day: ${max}`), h("span", {}, date(perDay.length - 1))));
 }
 
+/** The dashboard's backup card: when the last one worked, or that it failed or is off. */
+function backupCard(b, now) {
+  const failed = b.last && !b.last.ok;
+  const value = b.last_ok_at ? ago(b.last_ok_at, now) : "none yet";
+  const sub = failed ? h("span", { class: "bad" }, "last run failed") : b.enabled ? "automatic" : h("span", { class: "warn" }, "not automatic");
+  return h("a", { class: "card link", href: "#/backups" }, h("div", { class: "n small-n" }, value), h("div", { class: "l" }, "Last backup"), h("div", { class: "s" }, sub));
+}
+
 function card(n, label, sub) {
   return h("div", { class: "card" }, h("div", { class: "n" }, n), h("div", { class: "l" }, label), sub && h("div", { class: "s" }, sub));
 }
@@ -238,7 +246,8 @@ async function dashboard() {
       card(t.designs, "Designs", `${t.releases} release${t.releases === 1 ? "" : "s"}`),
       card(t.versions, "Versions", `${total30} in 30 days`),
       card(t.checked_out, "Checked out"),
-      card(bytes(o.disk_bytes), "On disk", `${bytes(t.stored_bytes)} of versions`)),
+      card(bytes(o.disk_bytes), "On disk", `${bytes(t.stored_bytes)} of versions`),
+      backupCard(o.backup, o.now)),
     h("div", { class: "panel" }, h("h2", {}, "Check-ins, last 30 days"), chart(o.per_day)),
     h("div", { class: "grid" },
       h("div", { class: "panel" }, h("h2", {}, "Recent activity"),
@@ -370,6 +379,132 @@ async function vaults() {
         h("td", { class: "num" }, v.users),
         h("td", { class: "muted small", title: v.last_change ? when(v.last_change) : null }, v.last_change ? ago(v.last_change) : "never")))))),
     h("p", { class: "muted small" }, "Users with access of their own; administrators may use every vault."),
+  ];
+}
+
+// ---- backups ----
+
+function inHours(secs, now) {
+  const d = secs - now;
+  if (d <= 60) return "in a moment";
+  if (d < 3600) return `in ${Math.round(d / 60)} min`;
+  if (d < 86400) return `in ${Math.round(d / 3600)} h`;
+  return `on ${when(secs)}`;
+}
+
+const TRIGGERS = { schedule: "scheduled", page: "this page", "command line": "command line" };
+const INTERVALS = [1, 2, 3, 6, 12, 24, 48, 72, 168];
+
+function intervalText(hours) {
+  if (hours === 1) return "every hour";
+  if (hours === 24) return "every day";
+  if (hours === 168) return "every week";
+  return hours % 24 === 0 ? `every ${hours / 24} days` : `every ${hours} hours`;
+}
+
+async function backups() {
+  const b = await api("GET", "/api/admin/backups");
+  const now = Date.now() / 1000;
+  const failed = b.runs_total - b.runs_ok;
+  const last = b.runs[0];
+  const runNow = async () => {
+    try {
+      await api("POST", "/api/admin/backups/run");
+      toast("Backup started");
+      route();
+    } catch (e) {
+      if (e.status !== 401) toast(e.message, true);
+    }
+  };
+
+  const warnings = [];
+  if (!b.target) warnings.push("No backup folder yet: set one below.");
+  else if (!b.target_exists) warnings.push(`${b.target} is not there. If it is a share, mount it; backups fail until then.`);
+  if (b.target && b.same_disk) warnings.push("The backup folder is on the same disk as the server's data: a failing disk takes both. A second disk or a share (SMB, NFS) is safer.");
+  if (last && !last.ok) warnings.push(`The last backup failed: ${last.message}`);
+
+  const s = b.settings;
+  const form = h("form", { class: "form settings" },
+    h("label", { class: "check" }, h("input", { type: "checkbox", name: "enabled", checked: s.enabled }), "Back up automatically"),
+    h("div", { class: "fields" },
+      h("div", {}, h("label", { for: "interval" }, "How often"),
+        h("select", { id: "interval", name: "interval_hours" },
+          INTERVALS.concat(INTERVALS.includes(s.interval_hours) ? [] : [s.interval_hours]).map((n) =>
+            h("option", { value: n, selected: n === s.interval_hours }, intervalText(n))))),
+      h("div", {}, h("label", { for: "keep" }, "Keep the newest"),
+        h("div", { class: "unit" }, h("input", { id: "keep", name: "keep_count", type: "number", min: 1, max: 1000, value: s.keep_count, required: true }), h("span", {}, "backups"))),
+      h("div", {}, h("label", { for: "days" }, "Delete older than"),
+        h("div", { class: "unit" }, h("input", { id: "days", name: "keep_days", type: "number", min: 0, max: 3650, value: s.keep_days, required: true }), h("span", {}, "days")))),
+    h("div", { class: "muted small" }, "The newest backup always stays. 0 days: no age limit, only the number counts."),
+    h("label", { for: "target" }, "Backup folder"),
+    b.target_fixed
+      ? h("div", {}, h("div", { class: "path fixed" }, b.target), h("div", { class: "muted small" }, "Set when the server was started (--backup-dir or SCPDM_BACKUP_DIR; in Docker the /backups volume)."))
+      : h("div", {}, h("input", { id: "target", name: "target", value: s.target || "", placeholder: "/mnt/nas/pdm-backups", spellcheck: "false" }),
+        h("div", { class: "muted small" }, "A folder on the server: another disk, or an SMB or NFS share mounted there. It must exist; the server never creates it, so an unmounted share is noticed.")),
+    h("div", { class: "error" }),
+    h("div", { class: "buttons" }, h("button", { type: "submit", class: "primary" }, "Save")));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const v = Object.fromEntries(new FormData(form));
+    const error = form.querySelector(".error");
+    error.textContent = "";
+    try {
+      await api("PUT", "/api/admin/backups/settings", {
+        enabled: form.querySelector("[name=enabled]").checked,
+        interval_hours: Number(v.interval_hours),
+        keep_count: Number(v.keep_count),
+        keep_days: Number(v.keep_days),
+        target: b.target_fixed ? s.target : (v.target || "").trim() || null,
+      });
+      toast("Backup settings saved");
+      route();
+    } catch (e) {
+      if (e.status !== 401) error.textContent = e.message;
+    }
+  });
+
+  const runs = b.runs.length === 0 ? h("div", { class: "empty" }, "No backups have run yet.") : h("div", { class: "wide" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "Started"), h("th", {}, "Result"), h("th", {}, "By"), h("th", { class: "num" }, "Took"),
+      h("th", { class: "num" }, "Files"), h("th", { class: "num" }, "Size"), h("th", { class: "num" }, "Written"))),
+    h("tbody", {}, b.runs.map((r) => h("tr", {},
+      h("td", { class: "nowrap", title: when(r.started_at) }, ago(r.started_at, now)),
+      h("td", {}, r.ok ? h("span", { class: "pill ok" }, "Done") : [h("span", { class: "pill bad" }, "Failed"), " ", h("span", { class: "muted small" }, r.message)]),
+      h("td", { class: "muted small nowrap" }, TRIGGERS[r.trigger] || r.trigger),
+      h("td", { class: "num muted small" }, duration(r.finished_at - r.started_at) === "0 min" ? `${r.finished_at - r.started_at} s` : duration(r.finished_at - r.started_at)),
+      h("td", { class: "num" }, r.ok ? r.files : "–"),
+      h("td", { class: "num" }, r.ok ? bytes(r.bytes) : "–"),
+      h("td", { class: "num", title: "Copied; the rest is shared with the backup before" }, r.ok ? bytes(r.copied) : "–"))))));
+
+  const stored = b.stored.length === 0 ? h("div", { class: "empty" }, "None in the folder.") : h("div", { class: "wide" }, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "Backup"), h("th", {}, "Made"), h("th", { class: "num" }, "Size"), h("th", {}, "Vaults"))),
+    h("tbody", {}, b.stored.map((x) => h("tr", {},
+      h("td", { class: "path" }, x.name),
+      h("td", { class: "nowrap muted small", title: when(x.created_at) }, when(x.created_at)),
+      h("td", { class: "num" }, bytes(x.bytes)),
+      h("td", { class: "muted small" }, x.vaults.join(", ")))))));
+
+  refreshTimer = setInterval(() => { if (!document.hidden && !document.querySelector("dialog[open]") && !form.contains(document.activeElement)) route(); }, b.running ? 2000 : 30000);
+  return [
+    h("div", { class: "head" }, h("h1", { class: "grow" }, "Backups"),
+      b.running && h("span", { class: "muted small" }, h("span", { class: "spinner" }), "Backing up…"),
+      h("button", { class: "primary", disabled: b.running || !b.target, onclick: runNow }, "Back up now")),
+    warnings.length > 0 && h("div", { class: "notes" }, warnings.map((w) => h("div", { class: "note" }, w))),
+    h("div", { class: "cards" },
+      card(b.last_ok_at ? ago(b.last_ok_at, now) : "–", "Last good backup", last ? (last.ok ? "the latest run worked" : h("span", { class: "bad" }, "the latest run failed")) : "none yet"),
+      card(b.next_at ? inHours(b.next_at, now) : "off", "Next backup", s.enabled ? intervalText(s.interval_hours) : "only by hand"),
+      card(b.runs_total ? `${Math.round((b.runs_ok / b.runs_total) * 100)} %` : "–", "Successful", `${b.runs_ok} of ${b.runs_total} run${b.runs_total === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}`),
+      card(b.stored.length, "Kept", b.stored[0] ? `newest ${bytes(b.stored[0].bytes)}` : `up to ${s.keep_count}`)),
+    h("div", { class: "grid" },
+      h("div", { class: "panel" }, h("h2", {}, "Settings"), form),
+      h("div", { class: "panel" }, h("h2", {}, "Restoring"),
+        h("p", { class: "prose" }, "Each backup is a complete data folder: users, access and every vault with all its versions."),
+        h("ol", { class: "prose" },
+          h("li", {}, "Stop the server."),
+          h("li", {}, "Move the data folder aside, and copy the backup's folder in its place."),
+          h("li", {}, "Start the server again. Workspaces catch up on their next refresh; changes made since the backup are still in them and can be checked in again.")),
+        h("p", { class: "muted small" }, "The data folder: ", h("span", { class: "path" }, b.data)))),
+    h("div", { class: "panel" }, h("h2", {}, "Recent runs"), runs),
+    h("div", { class: "panel" }, h("h2", {}, "In the backup folder"), stored),
   ];
 }
 

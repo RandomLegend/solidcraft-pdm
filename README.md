@@ -73,6 +73,8 @@ uploads the new version; the others see it as *Newer on server* and get it with 
 - **An administration page** in the browser, at the server's address: a dashboard with who is
   online, check-ins per day, recent activity and what is checked out (a forgotten check-out can
   be broken there); users, their passwords and their access to each vault; vaults.
+- **Automatic backups** of all vaults to another disk or a network share (SMB, NFS): on a
+  schedule, kept as long as you say, each one a complete copy that only stores what changed.
 
 <img src="docs/images/server-users.png" alt="Users and their access to the vaults" width="100%">
 
@@ -84,7 +86,8 @@ docker compose up -d
 docker compose exec pdm scpdm-server user add admin --admin    # then open http://<server>:7380
 ```
 
-Everything about it, from setup and backups to HTTPS: the **[server guide](docs/server.md)**.
+Everything about it, from setup and [backups](docs/server.md#backups) to HTTPS: the
+**[server guide](docs/server.md)**.
 
 ## Install
 

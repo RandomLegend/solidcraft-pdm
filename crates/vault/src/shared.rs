@@ -163,6 +163,12 @@ impl Vault {
         })
     }
 
+    /// A consistent copy of the vault's database at `to` (a new file), while it stays in use.
+    pub fn backup_db(&self, to: &std::path::Path) -> Result<()> {
+        self.db.execute("VACUUM INTO ?1", [to.to_string_lossy()])?;
+        Ok(())
+    }
+
     /// The newest versions of any design, newest first.
     pub fn recent_versions(&self, limit: usize) -> Result<Vec<Version>> {
         let mut stmt = self.db.prepare(&format!("{VERSION_SELECT} ORDER BY created_at DESC, id DESC LIMIT ?1"))?;
