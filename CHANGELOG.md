@@ -3,7 +3,9 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
-## Unreleased
+## 0.2.0 — 2026-10-21
+
+Shared vaults for a small team, with an optional server, and updates for the app.
 
 ### Team server
 
@@ -16,6 +18,9 @@ whose heading starts with `## <version>`.
   properties, folders and reference images are shared.
 - The app: *Vault > Connect to a server…*, server statuses and who has a design checked out.
 - The command line: `scpdm remote …`.
+- Runs with Docker: the image `registry.gitlab.com/randomlegend/solidcraft-pdm/server` and a
+  `compose.yml` (with optional HTTPS through Caddy), or as a program of its own
+  (`scpdm-server-0.2.0-x86_64-linux`).
 
 ### Updates
 
