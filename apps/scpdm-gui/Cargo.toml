@@ -1,0 +1,27 @@
+[package]
+name = "scpdm-gui"
+description = "Desktop PDM for SolidCraft designs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "solidcraft-pdm"
+path = "src/main.rs"
+
+[dependencies]
+scformat = { workspace = true }
+vault = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+eframe = { workspace = true }
+egui_extras = { workspace = true }
+image = { workspace = true }
+rfd = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+tempfile = { workspace = true }
+zip = { workspace = true }

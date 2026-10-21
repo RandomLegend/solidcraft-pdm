@@ -1,0 +1,13 @@
+[package]
+name = "scpdm"
+description = "Command-line PDM for SolidCraft designs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+scformat = { workspace = true }
+vault = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }

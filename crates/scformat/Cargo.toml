@@ -1,0 +1,13 @@
+[package]
+name = "scformat"
+description = "Read-only access to SolidCraft design files (.solidcraft) for the PDM: properties, links, thumbnail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+zip = { workspace = true }
+thiserror = { workspace = true }

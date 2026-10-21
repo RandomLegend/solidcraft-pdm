@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/scformat", "crates/vault", "apps/scpdm", "apps/scpdm-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+scformat = { path = "crates/scformat" }
+vault = { path = "crates/vault" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+thiserror = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "persistence"] }
+egui_extras = { version = "0.33", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = "0.15"
+egui_kittest = { version = "0.33", features = ["eframe", "wgpu", "snapshot"] }
+
+# Keep builds small: full debug info only for our own crates.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 1
