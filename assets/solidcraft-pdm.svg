@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- SolidCraft PDM: a part (isometric box) in front of the versions it came from. -->
+  <rect x="8" y="8" width="240" height="240" rx="44" fill="#22304a"/>
+  <!-- earlier versions: outlines behind, offset up and to the right -->
+  <g fill="none" stroke="#6f8fc7" stroke-width="7" stroke-linejoin="round" opacity="0.55">
+    <path d="M150 40 L206 66 L206 124 L150 150 L94 124 L94 66 Z"/>
+  </g>
+  <g fill="none" stroke="#8fb0e8" stroke-width="7" stroke-linejoin="round" opacity="0.8">
+    <path d="M136 58 L192 84 L192 142 L136 168 L80 142 L80 84 Z"/>
+  </g>
+  <!-- the current version -->
+  <path d="M120 78 L178 105 L120 132 L62 105 Z" fill="#f0a050"/>
+  <path d="M62 105 L120 132 L120 196 L62 169 Z" fill="#c97a32"/>
+  <path d="M120 132 L178 105 L178 169 L120 196 Z" fill="#9c5a22"/>
+  <path d="M120 78 L178 105 L178 169 L120 196 L62 169 L62 105 Z" fill="none" stroke="#2a1a0c" stroke-width="3" stroke-linejoin="round" opacity="0.35"/>
+</svg>

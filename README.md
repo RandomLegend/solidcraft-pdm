@@ -8,6 +8,16 @@ cargo run --release -p scpdm-gui -- ~/CAD     # desktop app (opens or offers to 
 cargo run --release -p scpdm -- --help        # command line
 ```
 
+## Download
+
+CI on gitlab.com builds both, on every push to `main` and for every tag (pipeline → job →
+*Browse* / *Download* artifacts):
+
+- **Linux:** `SolidCraft-PDM-<version>-x86_64.AppImage` (job `linux:appimage`; glibc 2.36 or
+  newer). Make it executable and run it; `SolidCraft-PDM-….AppImage cli status` runs the command
+  line. Build one locally with `packaging/linux/build-appimage.sh`.
+- **Windows:** `solidcraft-pdm.exe` and `scpdm.exe` (job `windows:build`); see `docs/windows.md`.
+
 ## Concepts
 
 - A **vault** is a folder of designs with a hidden `.pdm/` folder. Your files stay ordinary files
@@ -81,6 +91,8 @@ scpdm ls [dir] / info <file> / thumb <file> <out.png>
 | `apps/scpdm` | Command-line tool |
 | `apps/scpdm-gui` | Desktop app (egui), binary `solidcraft-pdm` |
 | `docs/windows.md` | Building for Windows 10 / 11, and what differs there |
+| `packaging/linux/` | AppImage: build script, `AppRun`, desktop entry (icon in `assets/`) |
+| `.gitlab-ci.yml` | Tests on Linux; AppImage and Windows builds |
 
 Tests: `cargo test --workspace`. The GUI test drives the real window over a demo vault;
 `SCPDM_SCREENSHOTS=<dir> cargo test -p scpdm-gui --test ui` also saves screenshots there.

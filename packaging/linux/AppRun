@@ -1,0 +1,10 @@
+#!/bin/sh
+# SolidCraft PDM AppImage entry point.
+#   SolidCraft-PDM.AppImage [folder]      the desktop app (opens the vault containing folder)
+#   SolidCraft-PDM.AppImage cli <args>    the command line (scpdm), e.g. "cli status"
+HERE="$(dirname "$(readlink -f "$0")")"
+if [ "${1:-}" = "cli" ]; then
+  shift
+  exec "$HERE/usr/bin/scpdm" "$@"
+fi
+exec "$HERE/usr/bin/solidcraft-pdm" "$@"

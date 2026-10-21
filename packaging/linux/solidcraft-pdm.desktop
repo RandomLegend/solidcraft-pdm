@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SolidCraft PDM
+GenericName=CAD data management
+Comment=Manage SolidCraft designs: folders, versions, thumbnails, search
+Exec=solidcraft-pdm %f
+Icon=solidcraft-pdm
+Terminal=false
+StartupWMClass=solidcraft-pdm
+Categories=Graphics;Engineering;
+Keywords=solidcraft;cad;pdm;versions;
