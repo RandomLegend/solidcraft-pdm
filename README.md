@@ -10,13 +10,13 @@ cargo run --release -p scpdm -- --help        # command line
 
 ## Download
 
-CI on gitlab.com builds both, on every push to `main` and for every tag (pipeline → job →
-*Browse* / *Download* artifacts):
+CI on gitlab.com builds these (pipeline → job → *Browse* / *Download* artifacts):
 
 - **Linux:** `SolidCraft-PDM-<version>-x86_64.AppImage` (job `linux:appimage`; glibc 2.36 or
   newer). Make it executable and run it; `SolidCraft-PDM-….AppImage cli status` runs the command
   line. Build one locally with `packaging/linux/build-appimage.sh`.
-- **Windows:** `solidcraft-pdm.exe` and `scpdm.exe` (job `windows:build`); see `docs/windows.md`.
+- **Windows:** `solidcraft-pdm.exe` and `scpdm.exe` (job `windows:build`, started by hand); see
+  `docs/windows.md`.
 
 ## Concepts
 

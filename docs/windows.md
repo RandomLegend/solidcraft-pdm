@@ -24,9 +24,11 @@ The screenshot mode of the UI tests (`SCPDM_SCREENSHOTS`) needs a GPU adapter.
 
 ## CI
 
-`.gitlab-ci.yml` builds and tests on gitlab.com's Windows runners (`saas-windows-medium-amd64`).
-It runs automatically on the default branch and on tags; on other branches you start it by hand
-in the pipeline view. The job installs Rust 1.93.1 with rustup. Its artifact
+`.gitlab-ci.yml` has a job that builds and tests on gitlab.com's Windows runners
+(`saas-windows-medium-amd64`). It only runs when you start it by hand (the play button of
+`windows:build` in the pipeline view), because it takes long; the pipeline does not wait for it.
+To build Windows releases automatically later, add `- if: $CI_COMMIT_TAG` above `- when: manual`
+in its `rules`. The job installs Rust 1.93.1 with rustup. Its artifact
 `solidcraft-pdm-windows-<commit>` holds `solidcraft-pdm.exe` and `scpdm.exe` (kept 30 days).
 The Linux job runs the tests on every push.
 
