@@ -847,6 +847,11 @@ pub fn find_designs(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     find_files(dir, &is_design, out)
 }
 
+/// Every reference image below `dir`, skipping hidden files and folders.
+pub fn find_images(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    find_files(dir, &is_image, out)
+}
+
 fn find_files(dir: &Path, wanted: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;

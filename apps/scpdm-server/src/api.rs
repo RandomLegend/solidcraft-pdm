@@ -361,9 +361,11 @@ fn apply(vault: &mut Vault, user: &User, action: Action) -> Reply<Done> {
         }
         Action::Move { from, to } => {
             not_checked_out_by_others(vault, &from, user, "")?;
+            // Designs whose links the move rewrites must be checked in (by anyone, also the
+            // caller): otherwise their checked-out copies would be stale.
             if vault::is_design(std::path::Path::new(&from)) {
                 for design in vault.move_affects(&from, &to)? {
-                    not_checked_out_by_others(vault, &design, user, &format!(": it links to {from}"))?;
+                    not_checked_out(vault, &design)?;
                 }
             }
             let report = vault.rename(&from, &to)?;

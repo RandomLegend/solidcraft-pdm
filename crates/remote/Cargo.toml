@@ -1,6 +1,20 @@
 [package]
 name = "remote"
+description = "SolidCraft PDM client for server vaults: the API client and local workspaces"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
+protocol = { workspace = true }
+vault = { workspace = true }
+ureq = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+scpdm-server = { path = "../../apps/scpdm-server" }
+tempfile = { workspace = true }
+scformat = { workspace = true }
