@@ -555,3 +555,22 @@ fn moving_a_linked_part_updates_the_assembly() {
     let history = Vault::open(&root).unwrap().history("assembly/pi4-enclosure.solidcraft").unwrap();
     assert_eq!(history[0].comment, "Link to parts/pi4-lid.solidcraft updated (moved from enclosure/pi4-lid.solidcraft)");
 }
+
+#[test]
+fn compares_a_version_with_the_working_file() {
+    let (_dir, _root, mut harness) = open_demo();
+    harness.state_mut().select("enclosure/pi4-lid.solidcraft");
+    settle(&mut harness);
+    harness.get_by_label("Properties").click();
+    harness.run_steps(4);
+    // v1 (revision A, blue) against the working file (v2: revision B, orange).
+    harness.query_all_by_label("Compare…").last().unwrap().click();
+    harness.run_steps(4);
+    harness.get_by_label("Compare pi4-lid.solidcraft");
+    harness.get_by_label("~ revision");
+    harness.get_by_label("Properties (1)");
+    screenshot(&mut harness, "10-compare");
+    harness.get_by_label("Close").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Compare pi4-lid.solidcraft").is_none());
+}

@@ -15,6 +15,8 @@
 //! geometry and does not depend on SolidCraft's crates, so it keeps working across SolidCraft
 //! releases: unknown fields are ignored.
 
+pub mod compare;
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek};
@@ -190,6 +192,22 @@ pub fn read<R: Read + Seek>(mut source: R) -> Result<DesignInfo> {
         let doc: RawDocument = serde_json::from_slice(&bytes)?;
         Ok(doc.into_info(Encoding::Json))
     }
+}
+
+/// A design's whole document (`document.json` of a container, or the plain JSON design).
+pub fn read_document(bytes: &[u8]) -> Result<serde_json::Value> {
+    if bytes.starts_with(&ZIP_SIGNATURE) {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+        return match zip.by_name("document.json") {
+            Ok(entry) => Ok(serde_json::from_slice(&read_bounded(entry, MAX_PART_BYTES, "document.json")?)?),
+            Err(zip::result::ZipError::FileNotFound) => Err(Error::MissingPart("document.json")),
+            Err(e) => Err(e.into()),
+        };
+    }
+    if bytes.len() as u64 > MAX_PART_BYTES {
+        return Err(Error::TooLarge("design"));
+    }
+    Ok(serde_json::from_slice(bytes)?)
 }
 
 /// Changes a design's document (`document.json` of a container, or the plain JSON design) and

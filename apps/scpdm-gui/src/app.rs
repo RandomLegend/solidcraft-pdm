@@ -16,6 +16,7 @@ use vault::{Entry, Status, Vault, Version};
 use crate::launcher::{self, Launcher};
 use crate::scan::{self, ImageFile, Info, Scan};
 use crate::search::{Haystack, Search};
+use scformat::compare::{Change, Comparison, FeatureChangeKind};
 
 /// How often the vault is rescanned while the window has focus (cheap: unchanged files are
 /// recognised by size and modification time).
@@ -137,6 +138,14 @@ enum Dialog {
     Settings { open_command: String },
     NewFolder { parent: String, name: String },
     NewDesign { folder: String, name: String, part_number: String, description: String, open: bool },
+    Compare { path: String, from: Side, to: Side, result: Option<Result<Comparison, String>> },
+}
+
+/// One side of a comparison.
+#[derive(Clone, Copy, PartialEq)]
+enum Side {
+    Working,
+    Version(u32),
 }
 
 /// What the user asked for while the frame was drawn; applied after drawing.
@@ -147,6 +156,8 @@ enum Action {
     CheckIn { path: String, comment: String },
     CheckInAll { comment: String, untracked: bool },
     AskRestore { path: String, number: u32 },
+    /// Compares a version with the working file (the working version with the one before).
+    AskCompare { path: String, number: u32, is_working: bool },
     Restore { path: String, number: u32 },
     SaveCopy { path: String, version: Version },
     Rename { from: String, to: String },
@@ -538,6 +549,14 @@ impl App {
                 self.start_scan(ctx);
             }
             Action::AskRestore { path, number } => self.dialog = Some(Dialog::Restore { path, number }),
+            Action::AskCompare { path, number, is_working } => {
+                let (from, to) = if is_working && number > 1 {
+                    (Side::Version(number - 1), Side::Version(number))
+                } else {
+                    (Side::Version(number), Side::Working)
+                };
+                self.dialog = Some(Dialog::Compare { path, from, to, result: None });
+            }
             Action::Restore { path, number } => {
                 let Some(vault) = &mut self.vault else { return };
                 match vault.restore(&path, number) {
@@ -705,6 +724,20 @@ impl App {
                     }
                     Err(e) => self.error(e),
                 }
+            }
+        }
+    }
+
+    /// The picture of a side of a comparison.
+    fn side_image(&mut self, path: &str, side: Side) -> Option<egui::Image<'static>> {
+        match side {
+            Side::Working => {
+                let entry = self.entry(path)?.clone();
+                self.entry_thumb(&entry)
+            }
+            Side::Version(n) => {
+                let version = self.history.iter().find(|v| v.number == n)?.clone();
+                self.version_thumb(&version)
             }
         }
     }
@@ -1513,6 +1546,9 @@ impl App {
                         if ui.add(egui::Button::new("Save copy…").small()).clicked() {
                             actions.push(Action::SaveCopy { path: entry.path.clone(), version: v.clone() });
                         }
+                        if ui.add(egui::Button::new("Compare…").small()).on_hover_text("What changed").clicked() {
+                            actions.push(Action::AskCompare { path: entry.path.clone(), number: v.number, is_working });
+                        }
                     });
                     buttons_top = buttons.response.rect.top();
                 });
@@ -1559,6 +1595,14 @@ impl App {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        // A comparison's pictures are looked up first (that may load them from the store).
+        let compare_images = match &self.dialog {
+            Some(Dialog::Compare { path, from, to, .. }) => {
+                let (path, from, to) = (path.clone(), *from, *to);
+                Some((self.side_image(&path, from), self.side_image(&path, to)))
+            }
+            _ => None,
+        };
         let Some(dialog) = &mut self.dialog else { return };
         let mut close = false;
         let modal = egui::Modal::new(egui::Id::new("dialog")).show(ctx, |ui| {
@@ -1659,6 +1703,43 @@ impl App {
                         }
                         close |= ui.button("Cancel").clicked();
                     });
+                }
+                Dialog::Compare { path, from, to, result } => {
+                    ui.set_min_width(680.0);
+                    ui.heading(format!("Compare {}", path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f)));
+                    ui.add_space(4.0);
+                    let (from_image, to_image) = compare_images.clone().unwrap_or((None, None));
+                    let before = (*from, *to);
+                    ui.horizontal(|ui| {
+                        for (label, side, image) in [("From", &mut *from, from_image), ("To", &mut *to, to_image)] {
+                            ui.vertical(|ui| {
+                                thumbnail(ui, image, egui::vec2(208.0, 130.0), egui::Sense::hover());
+                                ui.horizontal(|ui| {
+                                    ui.label(label);
+                                    side_picker(ui, label, side, &self.history);
+                                });
+                            });
+                            ui.add_space(12.0);
+                        }
+                    });
+                    if (*from, *to) != before {
+                        *result = None;
+                    }
+                    if result.is_none() {
+                        *result = Some(self.vault.as_ref().map_or(Err("no vault".into()), |v| {
+                            compare_sides(v, path, &self.history, *from, *to)
+                        }));
+                    }
+                    ui.separator();
+                    egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.5).show(ui, |ui| match result {
+                        Some(Ok(c)) => comparison_ui(ui, c),
+                        Some(Err(e)) => {
+                            ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                        }
+                        None => {}
+                    });
+                    ui.add_space(8.0);
+                    close |= ui.button("Close").clicked();
                 }
                 Dialog::NewDesign { folder, name, part_number, description, open } => {
                     ui.heading("New design");
@@ -1911,6 +1992,114 @@ enum Sameness {
     /// An older version with that content (the one a restore brought back).
     SameContent,
     Different,
+}
+
+/// The two sides' files, compared.
+fn compare_sides(vault: &Vault, path: &str, history: &[Version], from: Side, to: Side) -> Result<Comparison, String> {
+    let bytes = |side: Side| -> Result<Vec<u8>, String> {
+        match side {
+            Side::Working => std::fs::read(vault.absolute(path)).map_err(|e| format!("working file: {e}")),
+            Side::Version(n) => {
+                let v = history.iter().find(|v| v.number == n).ok_or(format!("no v{n}"))?;
+                vault.version_bytes(v).map_err(|e| e.to_string())
+            }
+        }
+    };
+    scformat::compare::compare(&bytes(from)?, &bytes(to)?).map_err(|e| e.to_string())
+}
+
+/// A choice of the working file or one of the versions.
+fn side_picker(ui: &mut egui::Ui, id: &str, side: &mut Side, history: &[Version]) {
+    let label = |s: Side| match s {
+        Side::Working => "working file".to_owned(),
+        Side::Version(n) => format!("v{n}"),
+    };
+    egui::ComboBox::from_id_salt(("compare-side", id)).selected_text(label(*side)).width(150.0).show_ui(ui, |ui| {
+        ui.selectable_value(side, Side::Working, "working file");
+        for v in history {
+            let text = if v.comment.is_empty() { format!("v{}", v.number) } else { format!("v{} · {}", v.number, v.comment) };
+            ui.selectable_value(side, Side::Version(v.number), text);
+        }
+    });
+}
+
+const ADDED: Color32 = Color32::from_rgb(80, 170, 100);
+const REMOVED: Color32 = Color32::from_rgb(215, 75, 75);
+const CHANGED: Color32 = Color32::from_rgb(225, 145, 40);
+
+/// The differences, by section.
+fn comparison_ui(ui: &mut egui::Ui, c: &Comparison) {
+    if c.is_empty() {
+        ui.label("No differences.");
+        return;
+    }
+    let changes = |ui: &mut egui::Ui, title: &str, list: &[Change]| {
+        if list.is_empty() {
+            return;
+        }
+        egui::CollapsingHeader::new(RichText::new(format!("{title} ({})", list.len())).strong()).default_open(true).show(ui, |ui| {
+            egui::Grid::new(("compare", title)).num_columns(4).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+                for ch in list {
+                    let (mark, color) = match (&ch.before, &ch.after) {
+                        (None, _) => ("+", ADDED),
+                        (_, None) => ("-", REMOVED),
+                        _ => ("~", CHANGED),
+                    };
+                    ui.colored_label(color, format!("{mark} {}", ch.what));
+                    ui.add(egui::Label::new(RichText::new(ch.before.as_deref().unwrap_or("")).weak()).truncate());
+                    ui.label(if ch.before.is_some() && ch.after.is_some() { "»" } else { "" });
+                    ui.add(egui::Label::new(ch.after.as_deref().unwrap_or("")).truncate());
+                    ui.end_row();
+                }
+            });
+        });
+    };
+    changes(ui, "Properties", &c.properties);
+    changes(ui, "Parameters", &c.parameters);
+    if !c.features.is_empty() || c.features_reordered {
+        egui::CollapsingHeader::new(RichText::new(format!("Features ({})", c.features.len())).strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                for f in &c.features {
+                    let (mark, color, detail) = match &f.change {
+                        FeatureChangeKind::Added => ("+", ADDED, "added".to_owned()),
+                        FeatureChangeKind::Removed => ("-", REMOVED, "removed".to_owned()),
+                        edited => ("~", CHANGED, describe_edit(edited)),
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(color, format!("{mark} {}", f.name));
+                        ui.weak(format!("({})", f.kind));
+                        ui.label(detail);
+                    });
+                }
+                if c.features_reordered {
+                    ui.weak("The order of the features changed.");
+                }
+            });
+    }
+    changes(ui, "Components", &c.components);
+    changes(ui, "Links", &c.links);
+    if !c.other.is_empty() {
+        ui.label(format!("Also changed: {}", c.other.join(", ")));
+    }
+}
+
+/// "renamed from X; suppressed; changed: radius, extent"
+fn describe_edit(change: &FeatureChangeKind) -> String {
+    let FeatureChangeKind::Edited { renamed_from, suppressed, settings } = change else { return String::new() };
+    let mut what = Vec::new();
+    if let Some(old) = renamed_from {
+        what.push(format!("renamed from {old}"));
+    }
+    match suppressed {
+        Some(true) => what.push("suppressed".to_owned()),
+        Some(false) => what.push("unsuppressed".to_owned()),
+        None => {}
+    }
+    if !settings.is_empty() {
+        what.push(format!("changed: {}", settings.join(", ")));
+    }
+    what.join("; ")
 }
 
 /// "New design here…" and "New folder here…" for `folder` ("" is the top level).

@@ -205,3 +205,57 @@ fn editing_refuses_what_is_not_a_design() {
     let no_doc = container(&[("container.json", CONTAINER_JSON)]).into_inner();
     assert!(matches!(scformat::edit_document(&no_doc, |_| {}), Err(Error::MissingPart("document.json"))));
 }
+
+#[test]
+fn compares_two_versions() {
+    use scformat::compare::{Change, FeatureChangeKind};
+    let before = br#"{"format": "solidcraft/28", "name": "case", "units": "mm",
+        "metadata": {"part_number": "P-1", "revision": "A"},
+        "params": [{"name": "height", "expr": "24 mm", "unit": "mm"}, {"name": "wall", "expr": "2 mm"}],
+        "features": [
+            {"id": 1, "name": "Sketch1", "type": "sketch", "suppressed": false, "sketch": {"lines": 4}},
+            {"id": 2, "name": "Extrude1", "type": "extrude", "suppressed": false, "extent": {"distance": "height"}},
+            {"id": 3, "name": "Fillet1", "type": "fillet", "suppressed": false, "radius": "1 mm"}],
+        "components": [{"id": 7, "name": "Lid", "parent": 0}],
+        "links": {"7": {"path": "lid.solidcraft", "feature": 2}},
+        "appearances": {"bodies": {}}}"#;
+    let after = br#"{"format": "solidcraft/29", "name": "case", "units": "mm",
+        "metadata": {"part_number": "P-1", "revision": "B", "description": "vented"},
+        "params": [{"name": "height", "expr": "32 mm", "unit": "mm"}, {"name": "vent", "expr": "5 mm"}],
+        "features": [
+            {"id": 1, "name": "Sketch1", "type": "sketch", "suppressed": false, "sketch": {"lines": 5}},
+            {"id": 2, "name": "Base", "type": "extrude", "suppressed": true, "extent": {"distance": "height"}},
+            {"id": 4, "name": "Shell1", "type": "shell", "suppressed": false}],
+        "components": [{"id": 7, "name": "Cover", "parent": 0}],
+        "links": {"7": {"path": "parts/lid.solidcraft", "feature": 2}},
+        "appearances": {"bodies": {"Body1": {"color": [1, 0, 0]}}}}"#;
+    let c = scformat::compare::compare(before, after).unwrap();
+    let ch = |what: &str, b: Option<&str>, a: Option<&str>| Change { what: what.into(), before: b.map(Into::into), after: a.map(Into::into) };
+
+    assert_eq!(c.properties, [ch("format", Some("solidcraft/28"), Some("solidcraft/29")), ch("description", None, Some("vented")), ch("revision", Some("A"), Some("B"))]);
+    assert_eq!(c.parameters, [ch("height", Some("24 mm"), Some("32 mm")), ch("vent", None, Some("5 mm")), ch("wall", Some("2 mm"), None)]);
+    let features: Vec<_> = c.features.iter().map(|f| (f.id, f.name.as_str(), f.change.clone())).collect();
+    assert_eq!(
+        features,
+        [
+            (1, "Sketch1", FeatureChangeKind::Edited { renamed_from: None, suppressed: None, settings: vec!["sketch".into()] }),
+            (2, "Base", FeatureChangeKind::Edited { renamed_from: Some("Extrude1".into()), suppressed: Some(true), settings: vec![] }),
+            (4, "Shell1", FeatureChangeKind::Added),
+            (3, "Fillet1", FeatureChangeKind::Removed),
+        ]
+    );
+    assert!(!c.features_reordered);
+    assert_eq!(c.components, [ch("Cover", Some("Lid"), Some("Cover"))]);
+    assert_eq!(c.links, [ch("Cover", Some("lid.solidcraft"), Some("parts/lid.solidcraft"))]);
+    assert_eq!(c.other, ["appearances"]);
+
+    assert!(scformat::compare::compare(before, before).unwrap().is_empty());
+}
+
+#[test]
+fn compares_across_storage_types() {
+    // The same document as plain JSON and in a container: no differences.
+    let json = std::fs::read(fixture("json-pi-case.solidcraft")).unwrap();
+    let boxed = container(&[("container.json", CONTAINER_JSON), ("document.json", &json)]).into_inner();
+    assert!(scformat::compare::compare(&json, &boxed).unwrap().is_empty());
+}

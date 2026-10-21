@@ -46,6 +46,8 @@ enum Command {
     },
     /// Show a design's versions, newest first
     Log { file: PathBuf },
+    /// What changed between two versions ("working" is the working file; default: compare with it)
+    Diff { file: PathBuf, from: String, to: Option<String> },
     /// Put an earlier version back (recorded as a new version; unsaved changes are checked in first)
     Restore { file: PathBuf, version: u32 },
     /// Save a copy of a version elsewhere, leaving the working file alone
@@ -108,6 +110,7 @@ fn run(command: Command) -> Result {
             Ok(())
         }
         Command::Log { file } => log(&file),
+        Command::Diff { file, from, to } => diff(&file, &from, to.as_deref().unwrap_or("working")),
         Command::Restore { file, version } => {
             let mut vault = Vault::discover(".")?;
             let path = vault.relative(&file)?;
@@ -197,6 +200,89 @@ fn log(file: &Path) -> Result {
         );
     }
     Ok(())
+}
+
+/// The bytes of a side of a comparison: a version number (`3`, `v3`) or `working`.
+fn side(vault: &Vault, path: &str, which: &str) -> std::result::Result<(String, Vec<u8>), Box<dyn std::error::Error>> {
+    if which == "working" {
+        return Ok(("working file".into(), std::fs::read(vault.absolute(path))?));
+    }
+    let number: u32 = which.trim_start_matches('v').parse().map_err(|_| format!("{which:?} is not a version (use 3, v3 or working)"))?;
+    let version = vault
+        .history(path)?
+        .into_iter()
+        .find(|v| v.number == number)
+        .ok_or_else(|| vault::Error::NoSuchVersion(path.to_owned(), number))?;
+    Ok((format!("v{number}"), vault.version_bytes(&version)?))
+}
+
+fn diff(file: &Path, from: &str, to: &str) -> Result {
+    use scformat::compare::FeatureChangeKind;
+    let vault = Vault::discover(".")?;
+    let path = vault.relative(file)?;
+    let (from_label, a) = side(&vault, &path, from)?;
+    let (to_label, b) = side(&vault, &path, to)?;
+    let c = scformat::compare::compare(&a, &b)?;
+    println!("{path}: {from_label} → {to_label}");
+    if c.is_empty() {
+        println!("  no differences");
+        return Ok(());
+    }
+    let changes = |title: &str, list: &[scformat::compare::Change]| {
+        if list.is_empty() {
+            return;
+        }
+        println!("{title}");
+        for ch in list {
+            match (&ch.before, &ch.after) {
+                (None, Some(a)) => println!("  + {}: {a}", ch.what),
+                (Some(b), None) => println!("  - {}: {b}", ch.what),
+                (Some(b), Some(a)) => println!("  ~ {}: {b} → {a}", ch.what),
+                (None, None) => {}
+            }
+        }
+    };
+    changes("Properties", &c.properties);
+    changes("Parameters", &c.parameters);
+    if !c.features.is_empty() || c.features_reordered {
+        println!("Features");
+        for f in &c.features {
+            match &f.change {
+                FeatureChangeKind::Added => println!("  + {} ({})", f.name, f.kind),
+                FeatureChangeKind::Removed => println!("  - {} ({})", f.name, f.kind),
+                FeatureChangeKind::Edited { .. } => println!("  ~ {} ({}): {}", f.name, f.kind, describe(&f.change)),
+            }
+        }
+        if c.features_reordered {
+            println!("  (features reordered)");
+        }
+    }
+    changes("Components", &c.components);
+    changes("Links", &c.links);
+    if !c.other.is_empty() {
+        println!("Also changed: {}", c.other.join(", "));
+    }
+    Ok(())
+}
+
+/// "renamed from X; suppressed; changed: radius, extent"
+fn describe(change: &scformat::compare::FeatureChangeKind) -> String {
+    let scformat::compare::FeatureChangeKind::Edited { renamed_from, suppressed, settings } = change else {
+        return String::new();
+    };
+    let mut what = Vec::new();
+    if let Some(old) = renamed_from {
+        what.push(format!("renamed from {old}"));
+    }
+    match suppressed {
+        Some(true) => what.push("suppressed".to_owned()),
+        Some(false) => what.push("unsuppressed".to_owned()),
+        None => {}
+    }
+    if !settings.is_empty() {
+        what.push(format!("changed: {}", settings.join(", ")));
+    }
+    what.join("; ")
 }
 
 fn info(file: &Path) -> Result {

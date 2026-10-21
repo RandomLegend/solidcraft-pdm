@@ -53,6 +53,9 @@ CI on gitlab.com builds these (pipeline → job → *Browse* / *Download* artifa
   description), checks it in as v1 and opens it in SolidCraft. *View* chooses the list columns
   (also by right-clicking the list header) and the interface size (also Ctrl + / Ctrl - /
   Ctrl 0; more presets in Vault > Settings). The interface starts at 150 %.
+- **Compare…** on a version in the history shows what changed against the working file (or
+  between any two versions): properties, parameters, features (added, removed, renamed,
+  suppressed, which settings), components, links, and which other parts of the design differ.
 - **Double-click** a design, its preview or the working version in the history to open it in
   SolidCraft; an older version opens as a read-only copy (to work on it, restore it first).
 
@@ -78,6 +81,7 @@ scpdm new <file> [--part-number P] [--description D]   create an empty design as
 scpdm status                     untracked / modified / missing designs
 scpdm ci <files…> -m "comment"   check in
 scpdm log <file>                 versions, newest first
+scpdm diff <file> <from> [to]    what changed (versions as 3 or v3, or "working"; to: working file)
 scpdm restore <file> <n>         put version n back
 scpdm export <file> <n> <out>    save a copy of version n
 scpdm mv <from> <to>             move or rename, keeping history
@@ -127,7 +131,7 @@ Tests: `cargo test --workspace`. The GUI test drives the real window over a demo
 2. ~~Vault, versions, restore, move/relink~~
 3. ~~Desktop GUI~~
 4. ~~Update links in other designs when a linked file is moved or renamed~~
-5. Compare two versions (properties, parameters, features)
+5. ~~Compare two versions (properties, parameters, features)~~
 6. Lifecycle states (WIP → released) and a revision scheme; edit design properties
 7. Upgrade egui (0.33 → current), packaging (`.desktop` file, AppImage; Windows: first build, icon, installer, CI — see `docs/windows.md`)
 8. Multi-user: check-out / locking, a shared vault
