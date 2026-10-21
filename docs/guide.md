@@ -66,3 +66,7 @@ what was found and takes another program or AppImage. On Windows see [windows.md
 New designs are written as plain JSON in format 1, which every SolidCraft release opens and
 upgrades (checked with SolidCraft 0.18.3: it saves such a file as a `solidcraft/29` container
 and keeps its properties).
+
+## Working with a team
+
+A vault can also live on a server that a small team shares: see [server.md](server.md).

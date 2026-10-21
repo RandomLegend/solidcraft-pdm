@@ -11,7 +11,8 @@
 in order: browse them by folder with big thumbnails, find anything with a fuzzy search, check in
 versions, see what changed, release revisions, and move files without breaking the links between
 them. Your designs stay ordinary files in an ordinary folder; SolidCraft opens and saves them as
-before. For one person, native on Linux, written in Rust.
+before. Native on Linux, written in Rust; for one person, or for a small team with the
+optional [server](docs/server.md).
 
 ## Features
 
@@ -43,6 +44,9 @@ before. For one person, native on Linux, written in Rust.
   folder.
 - **Made for SolidCraft.** Double-click opens a design in SolidCraft as installed, also as an
   AppImage; *+ New design* starts one. The interface scales up to 250 % for large screens.
+- **Optional team server.** Share vaults with a small team: everyone works in a folder of their
+  own, checks designs out (one person at a time) and checks them in; moves, releases and
+  properties are changed on the server. See [docs/server.md](docs/server.md).
 
 More in the [guide](docs/guide.md).
 
@@ -82,6 +86,7 @@ scpdm new <file> [--part-number P] [--description D]   create an empty design as
 scpdm scheme [letters|numbers]   the vault's revision scheme
 scpdm relink <missing> <to>      attach history to a file moved outside the PDM
 scpdm ls [dir] / info <file> / thumb <file> <out.png>
+scpdm remote …                   a workspace of a server vault (docs/server.md)
 ```
 
 ## Building
@@ -91,6 +96,7 @@ Rust 1.93 or newer:
 ```sh
 cargo run --release -p scpdm-gui -- ~/CAD     # the desktop app
 cargo run --release -p scpdm -- --help        # the command line
+cargo run --release -p scpdm-server -- --help # the team server
 cargo test --workspace                        # the tests (the GUI tests drive the real window)
 packaging/linux/build-appimage.sh             # dist/SolidCraft-PDM-<version>-x86_64.AppImage
 ```
@@ -99,10 +105,13 @@ packaging/linux/build-appimage.sh             # dist/SolidCraft-PDM-<version>-x8
 |---|---|
 | `crates/scformat` | SolidCraft design files (container or plain JSON): properties, links, thumbnail; exact edits; comparing versions |
 | `crates/vault` | The vault: SQLite index (`.pdm/vault.db`), content-addressed store (`.pdm/objects/`), lifecycle |
+| `crates/protocol` | The server's HTTP API: JSON types shared by server and client |
+| `crates/remote` | Client: server connection and workspaces (a local folder of a server vault) |
 | `apps/scpdm` | Command line |
+| `apps/scpdm-server` | Team server (axum): users, sessions, access, check-out locks |
 | `apps/scpdm-gui` | Desktop app (egui), binary `solidcraft-pdm` |
 | `packaging/` | AppImage, Windows installer, icons (`make-icons.py`; the source is `assets/solidcraft-pdm.svg`) |
-| `docs/` | [Guide](docs/guide.md), [Windows](docs/windows.md), README images (`make-screenshots.sh`) |
+| `docs/` | [Guide](docs/guide.md), [Server](docs/server.md), [Windows](docs/windows.md), README images (`make-screenshots.sh`) |
 
 ## Releasing
 
@@ -127,7 +136,11 @@ release with the changelog section as its notes. A tag whose version does not ma
   `crates/scformat/tests/solidcraft_cli.rs` has SolidCraft itself re-save what the PDM wrote.
 - **Versions are whole-file copies, stored once per distinct content** (SHA-256) and verified on
   read.
-- **Single user, by design.** One person, one vault folder; no check-out, locking or server.
+- **Standalone first, server optional.** A vault on your own machine needs nothing else. The
+  server keeps each shared vault as an ordinary vault and adds users, check-out locks and an
+  HTTP API; people work in local workspaces (not temporary copies), so links between designs
+  keep working and saved work is never lost. Locking instead of merging, since CAD files
+  cannot be merged.
 
 ## Credits
 

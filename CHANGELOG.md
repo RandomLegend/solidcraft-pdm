@@ -3,6 +3,20 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
+## Unreleased
+
+### Team server
+
+- `scpdm-server`: shared vaults for a small team, with users, logins and read / write / admin
+  access per vault. See [docs/server.md](docs/server.md).
+- Workspaces: a local folder per server vault, where SolidCraft opens and saves the designs.
+- Get, check out (one person at a time), check in, undo check-out; a change made without
+  checking out, or on an old version, is caught and never overwritten.
+- Moves update links on the server; other workspaces follow. Releases, revisions, obsolete,
+  properties, folders and reference images are shared.
+- The app: *Vault > Connect to a server…*, server statuses and who has a design checked out.
+- The command line: `scpdm remote …`.
+
 ## 0.1.0 — 2026-10-21
 
 The first release: a PDM for SolidCraft designs, for one person, native on Linux.
