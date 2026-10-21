@@ -4,8 +4,8 @@ SolidCraft PDM works on its own, for one person. For a small team, a **server** 
 shared vaults: everyone works in a folder of their own (a *workspace*), and a design is
 changed by one person at a time, who has it *checked out*.
 
-Status: new in 0.2 (not yet released). The server runs on Linux; a Docker image and a Windows
-build come later. It is meant for a trusted team on one network or a VPN.
+New in 0.2. The server runs on Linux, with Docker or as a program of its own; a Windows build
+comes later. It is meant for a trusted team on one network or a VPN.
 
 ## How it works
 
@@ -36,9 +36,46 @@ Statuses in the app: *On the server* (not fetched), *Up to date*, *Newer on serv
 out*, *Checked out · changed*, *Checked out by anna*, *Changed, not checked out*, *Conflict*,
 *Not on the server* (a new file of yours: *Add to the server*), *Removed on the server*.
 
-## Running the server
+## With Docker
 
-Build it (Rust 1.93 or newer):
+Each release has an image, `registry.gitlab.com/randomlegend/solidcraft-pdm/server` (tags
+`latest` and the version, e.g. `0.2.0`). With
+[packaging/docker/compose.yml](../packaging/docker/compose.yml) in a folder of its own:
+
+```sh
+docker compose up -d
+docker compose exec pdm scpdm-server user add root --admin    # asks for the password
+docker compose exec pdm scpdm-server user add anna
+docker compose exec pdm scpdm-server vault add workshop
+docker compose exec pdm scpdm-server grant anna workshop write
+```
+
+The server listens on port 7380 (`PDM_PORT` changes it); the app connects to
+`http://<this machine>:7380`. Users and vaults are in the volume `pdm-data` (mounted at
+`/data`); back it up with the container stopped (`docker compose stop`). Users and vaults can
+be added while the server runs. Settings, in the environment or a `.env` file next to
+`compose.yml`: `PDM_NAME` (the name the app shows), `PDM_PORT`, `PDM_VERSION` (an image tag
+instead of `latest`). `docker compose pull && docker compose up -d` updates the server.
+
+**HTTPS with Caddy:** for a server reachable by a name (it needs ports 80 and 443 for its
+certificate from Let's Encrypt):
+
+```sh
+PDM_DOMAIN=pdm.example.com docker compose --profile https up -d
+```
+
+The app then connects to `https://pdm.example.com`. Port 7380 stays open for plain HTTP;
+remove its `ports` entry to only allow HTTPS.
+
+Without `compose.yml`:
+`docker run -d -p 7380:7380 -v pdm-data:/data registry.gitlab.com/randomlegend/solidcraft-pdm/server`.
+The image builds from the project folder with
+`docker build -f packaging/docker/Dockerfile -t solidcraft-pdm-server .`.
+
+## As a program
+
+Each release has `scpdm-server-<version>-x86_64-linux` (glibc 2.36 or newer), or build it
+(Rust 1.93 or newer):
 
 ```sh
 cargo build --release -p scpdm-server     # target/release/scpdm-server

@@ -95,8 +95,19 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(async {
                 let listener = tokio::net::TcpListener::bind(&listen).await?;
                 println!("{name}: serving {} on http://{}", cli.data.display(), listener.local_addr()?);
+                // Ctrl+C, or SIGTERM from `docker stop` and service managers.
                 let shutdown = async {
+                    #[cfg(unix)]
+                    {
+                        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => {}
+                            _ = term.recv() => {}
+                        }
+                    }
+                    #[cfg(not(unix))]
                     let _ = tokio::signal::ctrl_c().await;
+                    println!("stopping");
                 };
                 scpdm_server::serve(server, listener, shutdown).await?;
                 anyhow::Ok(())

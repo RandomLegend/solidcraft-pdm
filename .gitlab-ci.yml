@@ -8,8 +8,11 @@
 #
 # A tag vX.Y.Z (see "Releasing" in the README) makes a GitLab release:
 # - release:check    the tag matches the version in Cargo.toml and CHANGELOG.md has its section
-# - release:appimage the AppImage and its SHA256SUMS (which the app's updates check), kept for good
-# - release          the release, with the changelog section as notes and both as downloads
+# - release:appimage the AppImage, the server for Linux (scpdm-server-<version>-x86_64-linux)
+#                    and their SHA256SUMS (which the app's updates check), kept for good
+# - release:docker   the server's Docker image: registry.gitlab.com/<project>/server:<version>
+#                    and :latest
+# - release          the release, with the changelog section as notes and the files as downloads
 
 stages:
   - test
@@ -95,18 +98,39 @@ release:appimage:
   needs: ["linux:test", "release:check"]
   script:
     - packaging/linux/build-appimage.sh dist
+    - cargo build --release --locked -p scpdm-server
+    - cp target/release/scpdm-server "dist/scpdm-server-${CI_COMMIT_TAG#v}-x86_64-linux"
     # The app checks what it downloads for an update against this.
-    - (cd dist && sha256sum *.AppImage > SHA256SUMS && cat SHA256SUMS)
+    - (cd dist && sha256sum *.AppImage scpdm-server-* > SHA256SUMS && cat SHA256SUMS)
     - echo "APPIMAGE_JOB_ID=$CI_JOB_ID" > appimage.env
     - echo "APPIMAGE_FILE=$(basename dist/*.AppImage)" >> appimage.env
+    - echo "SERVER_FILE=$(basename dist/scpdm-server-*)" >> appimage.env
   artifacts:
     name: solidcraft-pdm-linux-$CI_COMMIT_TAG
     paths:
       - dist/*.AppImage
+      - dist/scpdm-server-*
       - dist/SHA256SUMS
     expire_in: never
     reports:
       dotenv: appimage.env
+
+release:docker:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  needs: ["linux:test", "release:check"]
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - image="$CI_REGISTRY_IMAGE/server"
+    - docker build -f packaging/docker/Dockerfile -t "$image:${CI_COMMIT_TAG#v}" -t "$image:latest" .
+    - docker push "$image:${CI_COMMIT_TAG#v}"
+    - docker push "$image:latest"
 
 release:
   stage: release
@@ -119,20 +143,23 @@ release:
     # Its dotenv report (the AppImage's job and file) is an artifact: it must be passed.
     - job: release:appimage
       artifacts: true
+    - job: release:docker
+      artifacts: false
   script:
     - apk add --no-cache curl jq
     - |
-      if [ -z "${APPIMAGE_JOB_ID:-}" ] || [ -z "${APPIMAGE_FILE:-}" ]; then
-        echo "release:appimage did not pass APPIMAGE_JOB_ID and APPIMAGE_FILE."
+      if [ -z "${APPIMAGE_JOB_ID:-}" ] || [ -z "${APPIMAGE_FILE:-}" ] || [ -z "${SERVER_FILE:-}" ]; then
+        echo "release:appimage did not pass APPIMAGE_JOB_ID, APPIMAGE_FILE and SERVER_FILE."
         exit 1
       fi
     - files="$CI_PROJECT_URL/-/jobs/$APPIMAGE_JOB_ID/artifacts/raw/dist"
     - |
       jq -n --arg tag "$CI_COMMIT_TAG" --arg name "SolidCraft PDM ${CI_COMMIT_TAG#v}" \
-        --rawfile notes release-notes.md --arg file "$APPIMAGE_FILE" --arg files "$files" \
+        --rawfile notes release-notes.md --arg file "$APPIMAGE_FILE" --arg server "$SERVER_FILE" --arg files "$files" \
         '{tag_name: $tag, name: $name, description: $notes,
           assets: {links: [
             {name: $file, url: ($files + "/" + $file), link_type: "package", direct_asset_path: ("/" + $file)},
+            {name: $server, url: ($files + "/" + $server), link_type: "package", direct_asset_path: ("/" + $server)},
             {name: "SHA256SUMS", url: ($files + "/SHA256SUMS"), link_type: "other", direct_asset_path: "/SHA256SUMS"}]}}' \
         > release.json
     - cat release.json

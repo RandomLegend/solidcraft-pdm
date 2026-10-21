@@ -68,6 +68,9 @@ restarts; see the [guide](docs/guide.md#updates).
 
 Windows 10 / 11: prepared, built by hand in CI; see [docs/windows.md](docs/windows.md).
 
+The team server runs with Docker (`registry.gitlab.com/randomlegend/solidcraft-pdm/server`,
+with a `compose.yml` that adds HTTPS) or as a program; see [docs/server.md](docs/server.md).
+
 ## Command line
 
 The same vault from a terminal: `scpdm` (in the AppImage: `SolidCraft-PDM-….AppImage cli …`).
@@ -112,7 +115,7 @@ packaging/linux/build-appimage.sh             # dist/SolidCraft-PDM-<version>-x8
 | `apps/scpdm` | Command line |
 | `apps/scpdm-server` | Team server (axum): users, sessions, access, check-out locks |
 | `apps/scpdm-gui` | Desktop app (egui), binary `solidcraft-pdm` |
-| `packaging/` | AppImage, Windows installer, icons (`make-icons.py`; the source is `assets/solidcraft-pdm.svg`) |
+| `packaging/` | AppImage, Windows installer, server Docker image and compose file, icons (`make-icons.py`; the source is `assets/solidcraft-pdm.svg`) |
 | `docs/` | [Guide](docs/guide.md), [Server](docs/server.md), [Windows](docs/windows.md), README images (`make-screenshots.sh`) |
 
 ## Releasing
@@ -121,9 +124,10 @@ packaging/linux/build-appimage.sh             # dist/SolidCraft-PDM-<version>-x8
    [CHANGELOG.md](CHANGELOG.md) (`## 0.2.0 — date`).
 2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 
-CI then builds the AppImage, stores it in the project's package registry and publishes a
-release with the changelog section as its notes. A tag whose version does not match
-`Cargo.toml`, or without a changelog section, fails the pipeline instead.
+CI then builds the AppImage and the server (program and Docker image), and publishes a
+release with the changelog section as its notes and the files with their `SHA256SUMS`. A tag
+whose version does not match `Cargo.toml`, or without a changelog section, fails the pipeline
+instead.
 
 ## Design decisions
 

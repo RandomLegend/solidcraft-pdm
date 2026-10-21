@@ -1,0 +1,6 @@
+# The Docker build (packaging/docker/Dockerfile) needs the sources only.
+target/
+dist/
+.git/
+.cargo-home/
+docs/images/

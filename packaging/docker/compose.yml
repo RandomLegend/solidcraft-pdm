@@ -1,0 +1,40 @@
+# The SolidCraft PDM server with Docker Compose (see docs/server.md):
+#
+#   docker compose up -d
+#   docker compose exec pdm scpdm-server user add root --admin
+#
+# HTTPS (optional): set PDM_DOMAIN to the server's name (it must reach this machine on ports
+# 80 and 443, for the certificate) and start with the "https" profile:
+#
+#   PDM_DOMAIN=pdm.example.com docker compose --profile https up -d
+
+services:
+  pdm:
+    image: registry.gitlab.com/randomlegend/solidcraft-pdm/server:${PDM_VERSION:-latest}
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      SCPDM_SERVER_NAME: ${PDM_NAME:-SolidCraft PDM}
+    ports:
+      - "${PDM_PORT:-7380}:7380"
+    volumes:
+      - pdm-data:/data
+
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${PDM_DOMAIN:-set-PDM_DOMAIN} --to pdm:7380
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+    depends_on:
+      - pdm
+
+volumes:
+  pdm-data:
+  caddy-data:
