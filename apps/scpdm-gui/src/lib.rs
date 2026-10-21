@@ -2,5 +2,7 @@
 
 pub mod app;
 mod launcher;
+#[cfg(not(windows))]
+mod menu_entry;
 mod scan;
 mod search;

@@ -2,7 +2,7 @@
 # - linux:test       the tests, on every push
 # - linux:appimage   SolidCraft-PDM-<version>-x86_64.AppImage, automatically on the default branch
 #                    and tags, by hand on other branches
-# - windows:build    solidcraft-pdm.exe and scpdm.exe and the tests on Windows: only when started
+# - windows:build    solidcraft-pdm.exe, scpdm.exe, the installer and the tests on Windows: only when started
 #                    by hand (play button in the pipeline), since it takes long; the pipeline
 #                    does not wait for it
 
@@ -90,6 +90,11 @@ windows:build:
     - if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - New-Item -ItemType Directory -Force -Path dist | Out-Null
     - Copy-Item target\release\solidcraft-pdm.exe, target\release\scpdm.exe, README.md, docs\windows.md -Destination dist
+    # The installer (Inno Setup 6, from Chocolatey, which the runner has).
+    - choco install innosetup -y --no-progress
+    - $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+    - '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\windows\solidcraft-pdm.iss'
+    - if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   artifacts:
     name: solidcraft-pdm-windows-$CI_COMMIT_SHORT_SHA
     paths:

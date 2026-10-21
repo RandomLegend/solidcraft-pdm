@@ -24,9 +24,12 @@ install -Dm755 "$root/target/release/scpdm" "$appdir/usr/bin/scpdm"
 install -Dm755 "$root/packaging/linux/AppRun" "$appdir/AppRun"
 install -Dm644 "$root/packaging/linux/solidcraft-pdm.desktop" "$appdir/usr/share/applications/solidcraft-pdm.desktop"
 install -Dm644 "$root/assets/solidcraft-pdm.svg" "$appdir/usr/share/icons/hicolor/scalable/apps/solidcraft-pdm.svg"
+for size in 16 32 48 64 128 256; do
+  install -Dm644 "$root/assets/solidcraft-pdm-$size.png" "$appdir/usr/share/icons/hicolor/${size}x${size}/apps/solidcraft-pdm.png"
+done
 cp "$appdir/usr/share/applications/solidcraft-pdm.desktop" "$appdir/"
-cp "$root/assets/solidcraft-pdm.svg" "$appdir/solidcraft-pdm.svg"
-cp "$root/assets/solidcraft-pdm.svg" "$appdir/.DirIcon"
+cp "$root/assets/solidcraft-pdm-256.png" "$appdir/solidcraft-pdm.png"
+cp "$root/assets/solidcraft-pdm-256.png" "$appdir/.DirIcon"
 
 if [ ! -x "$tool" ]; then
   mkdir -p "$(dirname "$tool")"

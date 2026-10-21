@@ -210,6 +210,9 @@ enum Action {
     AskEditProperties(String),
     SaveProperties { path: String, name: String, values: [String; 7], check_in: bool, comment: String },
     SetScheme(vault::RevisionScheme),
+    /// Adds the app to the application menu (`true`) or takes it out.
+    #[cfg_attr(windows, allow(dead_code))]
+    MenuEntry(bool),
     CreateDesign { path: String, part_number: String, description: String, open: bool },
 }
 
@@ -776,6 +779,23 @@ impl App {
                 }
                 self.load_history();
                 self.start_scan(ctx);
+            }
+            Action::MenuEntry(add) => {
+                #[cfg(not(windows))]
+                {
+                    let result = match (crate::menu_entry::data_home(), crate::menu_entry::program()) {
+                        (Some(data), Some(program)) if add => crate::menu_entry::install(&data, &program),
+                        (Some(data), _) if !add => crate::menu_entry::remove(&data),
+                        _ => Err("no home folder or program path".to_owned()),
+                    };
+                    match result {
+                        Ok(()) if add => self.info_msg("SolidCraft PDM is in the application menu"),
+                        Ok(()) => self.info_msg("SolidCraft PDM is out of the application menu"),
+                        Err(e) => self.error(e),
+                    }
+                }
+                #[cfg(windows)]
+                let _ = add;
             }
             Action::SetScheme(scheme) => {
                 let Some(vault) = &mut self.vault else { return };
@@ -2048,6 +2068,8 @@ impl App {
                         ui.label(RichText::new("Applies to the next release of each design.").small().weak());
                         ui.add_space(10.0);
                     }
+                    #[cfg(not(windows))]
+                    menu_entry_settings(ui, actions);
                     ui.label(RichText::new("Interface size").strong());
                     ui.horizontal_wrapped(|ui| {
                         let current = ui.ctx().zoom_factor();
@@ -2212,6 +2234,38 @@ enum Sameness {
     /// An older version with that content (the one a restore brought back).
     SameContent,
     Different,
+}
+
+/// Settings: adding the app to the application menu.
+#[cfg(not(windows))]
+fn menu_entry_settings(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    let (Some(data), Some(program)) = (crate::menu_entry::data_home(), crate::menu_entry::program()) else { return };
+    ui.label(RichText::new("Application menu").strong());
+    ui.horizontal_wrapped(|ui| match crate::menu_entry::installed(&data) {
+        Some(p) if p == program => {
+            ui.label("SolidCraft PDM is in the application menu.");
+            if ui.button("Remove").clicked() {
+                actions.push(Action::MenuEntry(false));
+            }
+        }
+        Some(p) => {
+            ui.label(format!("The menu entry starts {}.", p.display()));
+            if ui.button("Use this program").on_hover_text(program.display().to_string()).clicked() {
+                actions.push(Action::MenuEntry(true));
+            }
+            if ui.button("Remove").clicked() {
+                actions.push(Action::MenuEntry(false));
+            }
+        }
+        None => {
+            if ui.button("Add SolidCraft PDM to the application menu").on_hover_text(program.display().to_string()).clicked() {
+                actions.push(Action::MenuEntry(true));
+            }
+        }
+    });
+    ui.label(RichText::new(format!("Starts {}", program.display())).small().weak());
+    ui.label(RichText::new("With its icon, which also gives it the right icon in the dock on Wayland.").small().weak());
+    ui.add_space(10.0);
 }
 
 /// The State column: "In progress", "Released B" (changed since: orange), "Obsolete".

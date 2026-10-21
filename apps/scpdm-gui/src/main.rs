@@ -14,7 +14,11 @@ fn main() -> eframe::Result {
             .with_title("SolidCraft PDM")
             .with_app_id("solidcraft-pdm")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([800.0, 480.0]),
+            .with_min_inner_size([800.0, 480.0])
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/solidcraft-pdm-256.png"))
+                    .expect("the icon is a valid PNG"),
+            ),
         // With vsync, presenting a frame on Wayland waits for the compositor's frame callback.
         // Hyprland sends none while it has nothing to redraw, so a repaint while the window is
         // unfocused could block the event loop, the ping went unanswered and Hyprland reported

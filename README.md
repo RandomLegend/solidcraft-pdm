@@ -13,10 +13,12 @@ cargo run --release -p scpdm -- --help        # command line
 CI on gitlab.com builds these (pipeline → job → *Browse* / *Download* artifacts):
 
 - **Linux:** `SolidCraft-PDM-<version>-x86_64.AppImage` (job `linux:appimage`; glibc 2.36 or
-  newer). Make it executable and run it; `SolidCraft-PDM-….AppImage cli status` runs the command
-  line. Build one locally with `packaging/linux/build-appimage.sh`.
-- **Windows:** `solidcraft-pdm.exe` and `scpdm.exe` (job `windows:build`, started by hand); see
-  `docs/windows.md`.
+  newer). Make it executable and run it; *Vault > Settings > Add SolidCraft PDM to the
+  application menu* puts it into your launcher with its icon (and the dock icon on Wayland).
+  `SolidCraft-PDM-….AppImage cli status` runs the command line. Build one locally with
+  `packaging/linux/build-appimage.sh`.
+- **Windows:** `solidcraft-pdm.exe`, `scpdm.exe` and an installer (job `windows:build`, started
+  by hand); see `docs/windows.md`.
 
 ## Concepts
 
@@ -111,7 +113,9 @@ scpdm ls [dir] / info <file> / thumb <file> <out.png>
 | `apps/scpdm` | Command-line tool |
 | `apps/scpdm-gui` | Desktop app (egui), binary `solidcraft-pdm` |
 | `docs/windows.md` | Building for Windows 10 / 11, and what differs there |
-| `packaging/linux/` | AppImage: build script, `AppRun`, desktop entry (icon in `assets/`) |
+| `packaging/linux/` | AppImage: build script, `AppRun`, desktop entry |
+| `packaging/windows/` | Installer (Inno Setup) |
+| `assets/` | Icon: `solidcraft-pdm.svg` is the source; PNGs and `.ico` from `packaging/make-icons.py` |
 | `.gitlab-ci.yml` | Tests on Linux; AppImage and Windows builds |
 
 Tests: `cargo test --workspace`. The GUI test drives the real window over a demo vault;
@@ -133,8 +137,8 @@ Tests: `cargo test --workspace`. The GUI test drives the real window over a demo
   the PDM wrote (set `SOLIDCRAFT_CLI` to an extracted AppImage's `usr/bin/solidcraft-cli`).
 - **Versions are whole-file copies, stored once per distinct content** (SHA-256, like SolidCraft's
   own blobs) and verified on read. Objects are read-only on disk.
-- **Single user.** No check-out or locking yet; SQLite runs in WAL mode so the app and the CLI
-  can be used side by side.
+- **Single user, by design.** One person, one vault folder; no check-out, locking or server.
+  SQLite runs in WAL mode so the app and the CLI can be used side by side.
 - Fixtures in `crates/scformat/tests/fixtures` come from the SolidCraft repository
   (MIT/Apache-2.0), commit `728f753`.
 
@@ -146,5 +150,7 @@ Tests: `cargo test --workspace`. The GUI test drives the real window over a demo
 4. ~~Update links in other designs when a linked file is moved or renamed~~
 5. ~~Compare two versions (properties, parameters, features)~~
 6. ~~Lifecycle states (WIP → released) and a revision scheme; edit design properties~~
-7. Upgrade egui (0.33 → current), packaging (`.desktop` file, AppImage; Windows: first build, icon, installer, CI — see `docs/windows.md`)
-8. Multi-user: check-out / locking, a shared vault
+7. ~~Upgrade egui~~ (to 0.35, the newest for Rust 1.93; 0.36+ need Rust 1.95), ~~packaging~~
+   (AppImage with icons and an *Add to application menu* button; Windows icon, installer and a
+   manual CI job, not run yet — see `docs/windows.md`)
+8. ~~Multi-user~~: not planned. SolidCraft PDM is a tool for one person.

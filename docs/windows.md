@@ -29,7 +29,8 @@ The screenshot mode of the UI tests (`SCPDM_SCREENSHOTS`) needs a GPU adapter.
 `windows:build` in the pipeline view), because it takes long; the pipeline does not wait for it.
 To build Windows releases automatically later, add `- if: $CI_COMMIT_TAG` above `- when: manual`
 in its `rules`. The job installs Rust 1.93.1 with rustup. Its artifact
-`solidcraft-pdm-windows-<commit>` holds `solidcraft-pdm.exe` and `scpdm.exe` (kept 30 days).
+`solidcraft-pdm-windows-<commit>` holds `solidcraft-pdm.exe`, `scpdm.exe` and
+`SolidCraft-PDM-<version>-setup.exe` (kept 30 days).
 The Linux job runs the tests on every push.
 
 ## What is Windows-specific
@@ -40,6 +41,8 @@ The Linux job runs the tests on every push.
 | Opening images | the file association (`explorer.exe <file>`) | `launcher::open_with_system` |
 | Show in folder | `explorer.exe /select,"<file>"` | `launcher::show_in_folder` |
 | Console window | none (`windows_subsystem = "windows"`) | `apps/scpdm-gui/src/main.rs` |
+| Icon, version info | embedded in the `.exe` (`winresource`, `assets/solidcraft-pdm.ico`) | `apps/scpdm-gui/build.rs` |
+| Installer | Inno Setup 6, per user (no administrator rights), Start menu entry, uninstaller | `packaging/windows/solidcraft-pdm.iss` |
 | Paths | resolved with `dunce`, so they are `C:\…` and not `\\?\C:\…` | `crates/vault/src/lib.rs` |
 | Typed paths | `folder\name` is accepted and stored as `folder/name` | `typed_path` in `app.rs` |
 | Settings | eframe's storage in `%APPDATA%` | eframe |
@@ -62,5 +65,7 @@ machine uses it at a time.
 - **Graphics**: the app draws with OpenGL (`glow`). Very old drivers or a VM without 3D support
   may fail to open the window. eframe's `wgpu` backend (Direct3D 12) is the alternative if
   that happens.
-- **Still to do**: an `.exe` icon and version info (`winres`), an installer (MSI with
-  `cargo-wix`, or Inno Setup), and signing the `.exe` (Windows SmartScreen warns about unsigned downloads).
+- **Not run yet**: the icon embedding and the installer are written but have only been checked
+  on Linux; the first run of the manual `windows:build` job is their test.
+- **Still to do**: signing the `.exe` and the installer (Windows SmartScreen warns about
+  unsigned downloads).
