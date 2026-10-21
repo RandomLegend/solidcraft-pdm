@@ -27,6 +27,15 @@ CI on gitlab.com builds these (pipeline → job → *Browse* / *Download* artifa
   or **Missing** (tracked, but the file is gone).
 - **Restore** puts an earlier version back. It never loses work: changes not checked in yet are
   checked in first, and the restore itself is recorded as a new version.
+- **Lifecycle:** a tracked design is *in progress*, *released* or *obsolete*. *Release* gives it
+  a revision (A, B, C … without I, O, Q, S, X, Z, or 01, 02 … per vault; a design never released
+  here proposes the revision its file already has), writes it into the design's Revision
+  property and records which version that revision is. Checking in a released design again
+  starts work on the next revision. Released files are not made read-only (SolidCraft saves by
+  renaming a new file over the old one): a released design that changed is shown as such.
+- **Edit properties…** writes name, part number, revision, project, description, author,
+  organization and licence into the design file (SolidCraft's *Design Properties*), and checks
+  that in if you like.
 - **Move / rename** inside the PDM keeps the history, and updates the links: in designs that
   link to the moved one, and the moved design's own relative links. An updated design that was
   up to date gets a new version saying why; one with changes not checked in yet keeps them and
@@ -84,7 +93,11 @@ scpdm log <file>                 versions, newest first
 scpdm diff <file> <from> [to]    what changed (versions as 3 or v3, or "working"; to: working file)
 scpdm restore <file> <n>         put version n back
 scpdm export <file> <n> <out>    save a copy of version n
-scpdm mv <from> <to>             move or rename, keeping history
+scpdm mv <from> <to>             move or rename, keeping history and updating links
+scpdm release <file> [-m note] [--revision R]   release (revision written into the design)
+scpdm revise <file> / obsolete <file> [--undo]  back to work in progress / obsolete
+scpdm props <file> [--set key=value]… [--name N] [--check-in]  show or edit design properties
+scpdm scheme [letters|numbers]   the vault's revision scheme
 scpdm relink <missing> <to>      attach history to a file moved outside the PDM
 scpdm ls [dir] / info <file> / thumb <file> <out.png>
 ```
@@ -132,6 +145,6 @@ Tests: `cargo test --workspace`. The GUI test drives the real window over a demo
 3. ~~Desktop GUI~~
 4. ~~Update links in other designs when a linked file is moved or renamed~~
 5. ~~Compare two versions (properties, parameters, features)~~
-6. Lifecycle states (WIP → released) and a revision scheme; edit design properties
+6. ~~Lifecycle states (WIP → released) and a revision scheme; edit design properties~~
 7. Upgrade egui (0.33 → current), packaging (`.desktop` file, AppImage; Windows: first build, icon, installer, CI — see `docs/windows.md`)
 8. Multi-user: check-out / locking, a shared vault

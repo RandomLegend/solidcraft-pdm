@@ -46,6 +46,36 @@ enum Command {
     },
     /// Show a design's versions, newest first
     Log { file: PathBuf },
+    /// Release a design as its next revision (writes the revision into it and checks it in)
+    Release {
+        file: PathBuf,
+        #[arg(short, long, default_value = "")]
+        message: String,
+        /// The revision (default: the one the design already has if never released, else the next)
+        #[arg(long)]
+        revision: Option<String>,
+    },
+    /// Take a released design back to work in progress
+    Revise { file: PathBuf },
+    /// Mark a design obsolete (--undo: back to work in progress)
+    Obsolete {
+        file: PathBuf,
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Show a design's properties, or change them (--set part_number=P-1; empty value removes)
+    Props {
+        file: PathBuf,
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        #[arg(long)]
+        name: Option<String>,
+        /// Check the change in as a new version
+        #[arg(long)]
+        check_in: bool,
+    },
+    /// Show or set the vault's revision scheme (letters: A, B, C…; numbers: 01, 02…)
+    Scheme { scheme: Option<String> },
     /// What changed between two versions ("working" is the working file; default: compare with it)
     Diff { file: PathBuf, from: String, to: Option<String> },
     /// Put an earlier version back (recorded as a new version; unsaved changes are checked in first)
@@ -110,6 +140,43 @@ fn run(command: Command) -> Result {
             Ok(())
         }
         Command::Log { file } => log(&file),
+        Command::Release { file, message, revision } => {
+            let mut vault = Vault::discover(".")?;
+            let path = vault.relative(&file)?;
+            let revision = match revision {
+                Some(r) => r,
+                None => vault.suggested_revision(&path)?,
+            };
+            let r = vault.release_as(&path, &revision, &message)?;
+            println!("{path}: released revision {} (v{})", r.revision, r.version);
+            Ok(())
+        }
+        Command::Revise { file } => {
+            let mut vault = Vault::discover(".")?;
+            let path = vault.relative(&file)?;
+            vault.revise(&path)?;
+            println!("{path}: work in progress on revision {}", vault.next_revision(&path)?);
+            Ok(())
+        }
+        Command::Obsolete { file, undo } => {
+            let mut vault = Vault::discover(".")?;
+            let path = vault.relative(&file)?;
+            vault.set_obsolete(&path, !undo)?;
+            println!("{path}: {}", if undo { "work in progress" } else { "obsolete" });
+            Ok(())
+        }
+        Command::Props { file, set, name, check_in } => props(&file, &set, name.as_deref(), check_in),
+        Command::Scheme { scheme } => {
+            let mut vault = Vault::discover(".")?;
+            match scheme.as_deref() {
+                None => {}
+                Some("letters") => vault.set_revision_scheme(vault::RevisionScheme::Letters)?,
+                Some("numbers") => vault.set_revision_scheme(vault::RevisionScheme::Numbers)?,
+                Some(other) => return Err(format!("unknown scheme {other:?} (letters or numbers)").into()),
+            }
+            println!("{:?}", vault.revision_scheme()?);
+            Ok(())
+        }
         Command::Diff { file, from, to } => diff(&file, &from, to.as_deref().unwrap_or("working")),
         Command::Restore { file, version } => {
             let mut vault = Vault::discover(".")?;
@@ -184,20 +251,63 @@ fn status() -> Result {
 fn log(file: &Path) -> Result {
     let vault = Vault::discover(".")?;
     let path = vault.relative(file)?;
+    let releases = vault.lifecycle(&path)?.releases;
     for v in vault.history(&path)? {
+        let released = releases.iter().find(|r| r.version == v.number).map(|r| format!("[released {}]", r.revision));
         let props = [v.part_number.as_deref(), v.revision.as_deref().map(|r| r.trim())]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>()
             .join(" rev ");
         println!(
-            "v{:<4} {}  {:<10} {:<20} {}",
+            "v{:<4} {}  {:<10} {:<20} {}{}",
             v.number,
             date(v.created_at),
             v.author,
             props,
+            released.map_or(String::new(), |r| format!("{r} ")),
             if v.comment.is_empty() { "-" } else { &v.comment }
         );
+    }
+    Ok(())
+}
+
+const PROPERTIES: [&str; 7] = ["part_number", "revision", "project", "description", "author", "organization", "license"];
+
+fn props(file: &Path, set: &[String], name: Option<&str>, check_in: bool) -> Result {
+    let mut vault = Vault::discover(".")?;
+    let path = vault.relative(file)?;
+    if !set.is_empty() || name.is_some() {
+        let mut values = Vec::new();
+        for item in set {
+            let (key, value) = item.split_once('=').ok_or_else(|| format!("{item:?}: use KEY=VALUE"))?;
+            if !PROPERTIES.contains(&key) {
+                return Err(format!("unknown property {key:?} (one of {})", PROPERTIES.join(", ")).into());
+            }
+            values.push((key, Some(value)));
+        }
+        vault.edit_properties(&path, name, &values)?;
+        if check_in {
+            match vault.check_in(&path, "Edited properties") {
+                Ok(v) => println!("{path}: v{}", v.number),
+                Err(vault::Error::Unchanged(_)) => println!("{path}: unchanged"),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    let info = scformat::read_file(vault.absolute(&path))?;
+    let m = &info.metadata;
+    println!("{:<14}{}", "name", info.name.as_deref().unwrap_or("-"));
+    for (key, value) in PROPERTIES.iter().zip([&m.part_number, &m.revision, &m.project, &m.description, &m.author, &m.organization, &m.license]) {
+        println!("{key:<14}{}", value.as_deref().unwrap_or("-"));
+    }
+    if let Ok(lifecycle) = vault.lifecycle(&path) {
+        let state = match lifecycle.state {
+            vault::State::Wip => format!("work in progress (next release: {})", vault.next_revision(&path)?),
+            vault::State::Released => format!("released ({})", lifecycle.releases.first().map_or("?", |r| r.revision.as_str())),
+            vault::State::Obsolete => "obsolete".to_owned(),
+        };
+        println!("{:<14}{state}", "state");
     }
     Ok(())
 }

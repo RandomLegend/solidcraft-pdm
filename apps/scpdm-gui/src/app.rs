@@ -62,6 +62,7 @@ impl Default for Settings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum ListColumn {
     Status,
+    State,
     Version,
     PartNumber,
     Revision,
@@ -69,12 +70,19 @@ enum ListColumn {
 }
 
 impl ListColumn {
-    const ALL: [ListColumn; 5] =
-        [ListColumn::Status, ListColumn::Version, ListColumn::PartNumber, ListColumn::Revision, ListColumn::Modified];
+    const ALL: [ListColumn; 6] = [
+        ListColumn::Status,
+        ListColumn::State,
+        ListColumn::Version,
+        ListColumn::PartNumber,
+        ListColumn::Revision,
+        ListColumn::Modified,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             ListColumn::Status => "Status",
+            ListColumn::State => "State",
             ListColumn::Version => "Ver",
             ListColumn::PartNumber => "Part number",
             ListColumn::Revision => "Rev",
@@ -93,6 +101,7 @@ impl ListColumn {
     fn width(self) -> f32 {
         match self {
             ListColumn::Status => 96.0,
+            ListColumn::State => 104.0,
             ListColumn::Version => 40.0,
             ListColumn::PartNumber => 110.0,
             ListColumn::Revision => 40.0,
@@ -107,6 +116,8 @@ const ZOOM_PRESETS: [f32; 6] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5];
 enum View {
     All,
     Status(Status),
+    /// Released or obsolete designs.
+    Lifecycle(vault::State),
     /// Designs directly in the vault folder.
     TopLevel,
     /// Everything below this folder.
@@ -139,7 +150,20 @@ enum Dialog {
     NewFolder { parent: String, name: String },
     NewDesign { folder: String, name: String, part_number: String, description: String, open: bool },
     Compare { path: String, from: Side, to: Side, result: Option<Result<Comparison, String>> },
+    Release { path: String, revision: String, note: String },
+    Properties { path: String, name: String, values: [String; 7], check_in: bool, comment: String },
 }
+
+/// The design properties the PDM edits, in the order shown, with their labels.
+const EDITABLE: [(&str, &str); 7] = [
+    ("part_number", "Part number"),
+    ("revision", "Revision"),
+    ("project", "Project"),
+    ("description", "Description"),
+    ("author", "Author"),
+    ("organization", "Organization"),
+    ("license", "License"),
+];
 
 /// One side of a comparison.
 #[derive(Clone, Copy, PartialEq)]
@@ -179,6 +203,13 @@ enum Action {
     /// Opens a version: the working file when it has that content, else a read-only copy.
     OpenVersion { path: String, version: Version },
     AskNewDesign(String),
+    AskRelease(String),
+    Release { path: String, revision: String, note: String },
+    Revise(String),
+    SetObsolete { path: String, obsolete: bool },
+    AskEditProperties(String),
+    SaveProperties { path: String, name: String, values: [String; 7], check_in: bool, comment: String },
+    SetScheme(vault::RevisionScheme),
     CreateDesign { path: String, part_number: String, description: String, open: bool },
 }
 
@@ -208,6 +239,8 @@ pub struct App {
     detected: Option<Launcher>,
     selected: Option<String>,
     history: Vec<Version>,
+    /// The selected design's lifecycle, and the revision proposed for its next release.
+    lifecycle: Option<(vault::Lifecycle, String)>,
     comment: String,
     message: Option<(String, bool)>,
     dialog: Option<Dialog>,
@@ -243,6 +276,7 @@ impl App {
             detected: launcher::detect(),
             selected: None,
             history: Vec::new(),
+            lifecycle: None,
             comment: String::new(),
             message: None,
             dialog: None,
@@ -369,6 +403,10 @@ impl App {
             (Some(vault), Some(path)) => vault.history(path).unwrap_or_default(),
             _ => Vec::new(),
         };
+        self.lifecycle = match (&self.vault, &self.selected) {
+            (Some(vault), Some(path)) => vault.lifecycle(path).ok().zip(vault.suggested_revision(path).ok()),
+            _ => None,
+        };
     }
 
     fn entry(&self, path: &str) -> Option<&Entry> {
@@ -470,6 +508,7 @@ impl App {
                         match &self.view {
                             View::All => true,
                             View::Status(s) => e.status == *s,
+                            View::Lifecycle(s) => e.state == Some(*s),
                             _ => in_folder(&e.path),
                         }
                     })
@@ -665,6 +704,85 @@ impl App {
                 if let Err(e) = launcher::open_with_system(&vault.absolute(&path)) {
                     self.error(format!("Could not open {path}: {e}"));
                 }
+            }
+            Action::AskRelease(path) => {
+                let revision = self.vault.as_ref().and_then(|v| v.suggested_revision(&path).ok()).unwrap_or_default();
+                self.dialog = Some(Dialog::Release { path, revision, note: String::new() });
+            }
+            Action::Release { path, revision, note } => {
+                let Some(vault) = &mut self.vault else { return };
+                match vault.release_as(&path, &revision, &note) {
+                    Ok(r) => {
+                        self.info_msg(format!("Released {path} as revision {} (v{})", r.revision, r.version));
+                        self.load_history();
+                        self.start_scan(ctx);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Action::Revise(path) => {
+                let Some(vault) = &mut self.vault else { return };
+                match vault.revise(&path) {
+                    Ok(()) => {
+                        self.info_msg(format!("{path} is work in progress again"));
+                        self.load_history();
+                        self.start_scan(ctx);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Action::SetObsolete { path, obsolete } => {
+                let Some(vault) = &mut self.vault else { return };
+                match vault.set_obsolete(&path, obsolete) {
+                    Ok(()) => {
+                        self.info_msg(if obsolete { format!("{path} is obsolete") } else { format!("{path} is work in progress again") });
+                        self.load_history();
+                        self.start_scan(ctx);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Action::AskEditProperties(path) => {
+                let Some(vault) = &self.vault else { return };
+                match scformat::read_file(vault.absolute(&path)) {
+                    Ok(info) => {
+                        let m = &info.metadata;
+                        let values = [&m.part_number, &m.revision, &m.project, &m.description, &m.author, &m.organization, &m.license]
+                            .map(|v| v.clone().unwrap_or_default());
+                        let name = info.name.clone().unwrap_or_default();
+                        self.dialog = Some(Dialog::Properties { path, name, values, check_in: true, comment: "Edited properties".into() });
+                    }
+                    Err(e) => self.error(format!("{path}: {e}")),
+                }
+            }
+            Action::SaveProperties { path, name, values, check_in, comment } => {
+                let Some(vault) = &mut self.vault else { return };
+                let properties: Vec<(&str, Option<&str>)> =
+                    EDITABLE.iter().zip(&values).map(|((key, _), v)| (*key, Some(v.as_str()))).collect();
+                let result = vault.edit_properties(&path, Some(&name), &properties).and_then(|()| {
+                    if !check_in {
+                        return Ok(None);
+                    }
+                    match vault.check_in(&path, &comment) {
+                        Ok(v) => Ok(Some(v.number)),
+                        Err(vault::Error::Unchanged(_)) => Ok(None),
+                        Err(e) => Err(e),
+                    }
+                });
+                match result {
+                    Ok(Some(n)) => self.info_msg(format!("Saved the properties of {path} (v{n})")),
+                    Ok(None) => self.info_msg(format!("Saved the properties of {path}")),
+                    Err(e) => self.error(e),
+                }
+                self.load_history();
+                self.start_scan(ctx);
+            }
+            Action::SetScheme(scheme) => {
+                let Some(vault) = &mut self.vault else { return };
+                if let Err(e) = vault.set_revision_scheme(scheme) {
+                    self.error(e);
+                }
+                self.load_history();
             }
             Action::ToggleColumn(column) => {
                 let hidden = &mut self.settings.hidden_columns;
@@ -920,6 +1038,13 @@ impl App {
                 }
             }
 
+            for state in [vault::State::Released, vault::State::Obsolete] {
+                let n = self.entries.iter().filter(|e| e.state == Some(state)).count();
+                if n > 0 || self.view == View::Lifecycle(state) {
+                    let label = if state == vault::State::Released { "Released" } else { "Obsolete" };
+                    ui.selectable_value(&mut view, View::Lifecycle(state), format!("{label}  ({n})"));
+                }
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Folders").strong());
@@ -1170,6 +1295,7 @@ impl App {
                                         let (label, color) = status_style(e.status);
                                         RichText::new(label).color(color)
                                     }
+                                    ListColumn::State => state_text(e),
                                     ListColumn::Version => latest.map_or("-".into(), |v| format!("v{}", v.number)).into(),
                                     ListColumn::PartNumber => props
                                         .and_then(|m| m.part_number.clone())
@@ -1307,6 +1433,9 @@ impl App {
                     ui.label(format!("· v{} of {}", v.number, self.history.len()));
                 }
             });
+            if let Some((lifecycle, next)) = self.lifecycle.clone() {
+                lifecycle_ui(ui, &entry, &lifecycle, &next, actions);
+            }
 
             if let Some(from) = &entry.moved_from {
                 ui.add_space(6.0);
@@ -1329,6 +1458,14 @@ impl App {
                 }
                 if ui.add_enabled(present, egui::Button::new("Move / rename…")).clicked() {
                     self.dialog = Some(Dialog::Rename { from: entry.path.clone(), to: entry.path.clone() });
+                }
+                let readable = info.is_some();
+                if ui
+                    .add_enabled(present && readable, egui::Button::new("Edit properties…"))
+                    .on_disabled_hover_text("Not a readable SolidCraft design")
+                    .clicked()
+                {
+                    actions.push(Action::AskEditProperties(entry.path.clone()));
                 }
             });
 
@@ -1520,6 +1657,10 @@ impl App {
                             Sameness::Different => {}
                         }
                     });
+                    let release = self.lifecycle.as_ref().and_then(|(l, _)| l.releases.iter().find(|r| r.version == v.number));
+                    if let Some(r) = release {
+                        ui.label(RichText::new(format!("Revision {}", r.revision)).color(ADDED).strong());
+                    }
                     if !v.comment.is_empty() {
                         ui.label(&v.comment);
                     }
@@ -1704,6 +1845,69 @@ impl App {
                         close |= ui.button("Cancel").clicked();
                     });
                 }
+                Dialog::Release { path, revision, note } => {
+                    ui.heading("Release");
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Revision");
+                        ui.add(egui::TextEdit::singleline(revision).desired_width(80.0));
+                    });
+                    ui.label(format!("{path} gets this revision: it is written into the design's Revision property and checked in as a new version, which is then the released revision."));
+                    ui.add(egui::TextEdit::singleline(note).hint_text("Note (optional), e.g. what this release is for").desired_width(f32::INFINITY));
+                    ui.label(
+                        RichText::new("If the design is open in SolidCraft, reopen it there afterwards to see the new revision.")
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let ok = !revision.trim().is_empty();
+                        if ui.add_enabled(ok, egui::Button::new(format!("Release {}", revision.trim()))).clicked() {
+                            actions.push(Action::Release { path: path.clone(), revision: revision.clone(), note: note.clone() });
+                            close = true;
+                        }
+                        close |= ui.button("Cancel").clicked();
+                    });
+                }
+                Dialog::Properties { path, name, values, check_in, comment } => {
+                    ui.heading("Design properties");
+                    ui.weak(path.as_str());
+                    ui.add_space(4.0);
+                    egui::Grid::new("properties-edit").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label("Name");
+                        ui.add(egui::TextEdit::singleline(name).desired_width(320.0));
+                        ui.end_row();
+                        for ((key, label), value) in EDITABLE.iter().zip(values.iter_mut()) {
+                            ui.label(*label);
+                            let multiline = *key == "description";
+                            let edit = if multiline { egui::TextEdit::multiline(value).desired_rows(2) } else { egui::TextEdit::singleline(value) };
+                            let response = ui.add(edit.desired_width(320.0));
+                            if *key == "revision" {
+                                response.on_hover_text("Releasing a design sets this itself");
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    ui.label(RichText::new("Written into the design file; SolidCraft shows them under File > Design Properties.").small().weak());
+                    ui.checkbox(check_in, "Check in as a new version");
+                    if *check_in {
+                        ui.add(egui::TextEdit::singleline(comment).desired_width(f32::INFINITY));
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            actions.push(Action::SaveProperties {
+                                path: path.clone(),
+                                name: name.clone(),
+                                values: values.clone(),
+                                check_in: *check_in,
+                                comment: comment.clone(),
+                            });
+                            close = true;
+                        }
+                        close |= ui.button("Cancel").clicked();
+                    });
+                }
                 Dialog::Compare { path, from, to, result } => {
                     ui.set_min_width(680.0);
                     ui.heading(format!("Compare {}", path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f)));
@@ -1828,6 +2032,22 @@ impl App {
                             .weak(),
                     );
                     ui.add_space(10.0);
+                    if let Some(vault) = &self.vault {
+                        ui.label(RichText::new("Revisions in this vault").strong());
+                        let current = vault.revision_scheme().unwrap_or(vault::RevisionScheme::Letters);
+                        ui.horizontal(|ui| {
+                            for (scheme, label) in [
+                                (vault::RevisionScheme::Letters, "Letters: A, B, C … (no I, O, Q, S, X, Z)"),
+                                (vault::RevisionScheme::Numbers, "Numbers: 01, 02, 03 …"),
+                            ] {
+                                if ui.radio(current == scheme, label).clicked() && current != scheme {
+                                    actions.push(Action::SetScheme(scheme));
+                                }
+                            }
+                        });
+                        ui.label(RichText::new("Applies to the next release of each design.").small().weak());
+                        ui.add_space(10.0);
+                    }
                     ui.label(RichText::new("Interface size").strong());
                     ui.horizontal_wrapped(|ui| {
                         let current = ui.ctx().zoom_factor();
@@ -1992,6 +2212,72 @@ enum Sameness {
     /// An older version with that content (the one a restore brought back).
     SameContent,
     Different,
+}
+
+/// The State column: "In progress", "Released B" (changed since: orange), "Obsolete".
+fn state_text(e: &Entry) -> RichText {
+    match (e.state, &e.release) {
+        (None, _) => RichText::new("-").weak(),
+        (Some(vault::State::Released), release) => {
+            let revision = release.as_ref().map_or("", |r| r.revision.as_str());
+            if e.status == Status::Modified {
+                RichText::new(format!("Released {revision} · changed")).color(CHANGED)
+            } else {
+                RichText::new(format!("Released {revision}")).color(ADDED)
+            }
+        }
+        (Some(vault::State::Obsolete), _) => RichText::new("Obsolete").weak().strikethrough(),
+        (Some(vault::State::Wip), _) => RichText::new("In progress"),
+    }
+}
+
+/// The selected design's lifecycle and what can be done with it.
+fn lifecycle_ui(ui: &mut egui::Ui, entry: &Entry, lifecycle: &vault::Lifecycle, next: &str, actions: &mut Vec<Action>) {
+    let path = entry.path.clone();
+    let current = entry.status == Status::Current;
+    ui.horizontal_wrapped(|ui| {
+        match lifecycle.state {
+            vault::State::Wip => {
+                ui.label("In progress");
+                if let Some(r) = lifecycle.releases.first() {
+                    ui.weak(format!("· last released {}", r.revision));
+                }
+                if ui
+                    .add_enabled(current, egui::Button::new(format!("Release as {next}…")).small())
+                    .on_disabled_hover_text("Check in the changes first")
+                    .clicked()
+                {
+                    actions.push(Action::AskRelease(path.clone()));
+                }
+            }
+            vault::State::Released => {
+                let r = lifecycle.releases.first();
+                ui.label(RichText::new(format!("Released {}", r.map_or("", |r| r.revision.as_str()))).color(ADDED).strong());
+                if let Some(r) = r {
+                    ui.weak(format!("· v{} · {}", r.version, unix_time(r.released_at)));
+                }
+                if ui.add(egui::Button::new("Revise").small()).on_hover_text(format!("Work on revision {next}")).clicked() {
+                    actions.push(Action::Revise(path.clone()));
+                }
+            }
+            vault::State::Obsolete => {
+                ui.label(RichText::new("Obsolete").weak().strikethrough());
+            }
+        }
+        let obsolete = lifecycle.state == vault::State::Obsolete;
+        let (label, hint) = if obsolete {
+            ("Back to work in progress", "Use this design again")
+        } else {
+            ("Mark obsolete", "No longer used; kept with its history")
+        };
+        if ui.add(egui::Button::new(label).small()).on_hover_text(hint).clicked() {
+            actions.push(Action::SetObsolete { path: path.clone(), obsolete: !obsolete });
+        }
+    });
+    if lifecycle.state == vault::State::Released && entry.status == Status::Modified {
+        let revision = lifecycle.releases.first().map_or("", |r| r.revision.as_str());
+        ui.colored_label(ui.visuals().warn_fg_color, format!("Changed since release {revision}: checking it in starts revision {next}."));
+    }
 }
 
 /// The two sides' files, compared.

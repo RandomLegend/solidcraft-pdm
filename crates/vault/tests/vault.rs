@@ -322,3 +322,118 @@ fn renaming_in_place_updates_links_and_images_just_move() {
     let report = vault.rename("parts/ref.png", "asm/ref.png").unwrap();
     assert!(report.updated.is_empty());
 }
+
+#[test]
+fn releasing_assigns_revisions_and_records_them() {
+    use vault::State;
+    let (dir, mut vault) = setup();
+    vault.check_in(CASE, "v1").unwrap();
+    assert_eq!(vault.lifecycle(CASE).unwrap().state, State::Wip);
+    assert_eq!(vault.next_revision(CASE).unwrap(), "A");
+
+    // The design says revision A already: v1 is revision A, no new version.
+    let a = vault.release(CASE, "first batch").unwrap();
+    assert_eq!((a.revision.as_str(), a.version, a.note.as_str()), ("A", 1, "first batch"));
+    assert_eq!(scformat::read_file(dir.path().join(CASE)).unwrap().metadata.revision.as_deref(), Some("A"));
+    assert_eq!(vault.history(CASE).unwrap().len(), 1);
+    let entry = vault.scan().unwrap().into_iter().find(|e| e.path == CASE).unwrap();
+    assert_eq!((entry.state, entry.release.map(|r| r.revision)), (Some(State::Released), Some("A".into())));
+    assert!(matches!(vault.release(CASE, ""), Err(Error::AlreadyReleased(_, r)) if r == "A"));
+
+    // Changed: must be checked in first; the check-in starts work on B.
+    fs::write(dir.path().join(CASE), design("P-1", 2)).unwrap();
+    assert!(matches!(vault.release(CASE, ""), Err(Error::NotCheckedIn(_))));
+    vault.check_in(CASE, "more holes").unwrap();
+    assert_eq!(vault.lifecycle(CASE).unwrap().state, State::Wip);
+    let b = vault.release(CASE, "").unwrap();
+    assert_eq!((b.revision.as_str(), b.version), ("B", 3));
+    assert_eq!(vault.history(CASE).unwrap()[0].comment, "Released revision B");
+    assert_eq!(scformat::read_file(dir.path().join(CASE)).unwrap().metadata.revision.as_deref(), Some("B"));
+    let releases: Vec<String> = vault.lifecycle(CASE).unwrap().releases.into_iter().map(|r| r.revision).collect();
+    assert_eq!(releases, ["B", "A"]);
+
+    vault.revise(CASE).unwrap();
+    assert_eq!(vault.lifecycle(CASE).unwrap().state, State::Wip);
+    assert!(matches!(vault.revise(CASE), Err(Error::NotReleased(_))));
+}
+
+#[test]
+fn obsolete_designs_cannot_be_released_until_revived() {
+    use vault::State;
+    let (_dir, mut vault) = setup();
+    vault.check_in(CASE, "v1").unwrap();
+    vault.set_obsolete(CASE, true).unwrap();
+    assert_eq!(vault.lifecycle(CASE).unwrap().state, State::Obsolete);
+    assert!(matches!(vault.release(CASE, ""), Err(Error::Obsolete(_))));
+    vault.set_obsolete(CASE, false).unwrap();
+    assert_eq!(vault.lifecycle(CASE).unwrap().state, State::Wip);
+}
+
+#[test]
+fn the_revision_scheme_can_be_numbers() {
+    let (_dir, mut vault) = setup();
+    vault.check_in(CASE, "v1").unwrap();
+    vault.set_revision_scheme(vault::RevisionScheme::Numbers).unwrap();
+    assert_eq!(vault.release(CASE, "").unwrap().revision, "01");
+    assert_eq!(vault::Vault::open(vault.root()).unwrap().revision_scheme().unwrap(), vault::RevisionScheme::Numbers);
+}
+
+#[test]
+fn a_released_assembly_stays_released_when_only_its_links_are_updated() {
+    let (_dir, mut vault) = linked_vault();
+    vault.release("asm/box.solidcraft", "").unwrap();
+    vault.rename("parts/lid.solidcraft", "parts/cover.solidcraft").unwrap();
+    assert_eq!(vault.lifecycle("asm/box.solidcraft").unwrap().state, vault::State::Released);
+}
+
+#[test]
+fn design_properties_are_written_into_the_file() {
+    let (dir, mut vault) = setup();
+    vault.check_in(CASE, "v1").unwrap();
+    vault
+        .edit_properties(CASE, Some("Case, vented"), &[("part_number", Some("P-77")), ("description", Some("PETG")), ("revision", None)])
+        .unwrap();
+    let info = scformat::read_file(dir.path().join(CASE)).unwrap();
+    assert_eq!(info.name.as_deref(), Some("Case, vented"));
+    assert_eq!(info.metadata.part_number.as_deref(), Some("P-77"));
+    assert_eq!(info.metadata.description.as_deref(), Some("PETG"));
+    assert_eq!(info.metadata.revision, None);
+    assert_eq!(vault.scan().unwrap()[0].status, Status::Modified, "not checked in by itself");
+
+    // Removing every property leaves no metadata at all.
+    vault.edit_properties(CASE, None, &[("part_number", None), ("description", Some("  "))]).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&fs::read(dir.path().join(CASE)).unwrap()).unwrap();
+    assert!(doc.get("metadata").is_none());
+    assert!(matches!(vault.edit_properties(CASE, None, &[("description", Some(&"x".repeat(5000)))]), Err(Error::TooLong(_))));
+}
+
+#[test]
+fn vaults_from_the_first_schema_are_upgraded() {
+    let (dir, mut vault) = setup();
+    vault.check_in(CASE, "v1").unwrap();
+    drop(vault);
+    // As the first version of the tool left it: no state, no releases, no settings.
+    let db = rusqlite::Connection::open(dir.path().join(".pdm/vault.db")).unwrap();
+    db.execute_batch("DROP TABLE releases; DROP TABLE settings; ALTER TABLE documents DROP COLUMN state; PRAGMA user_version = 1;").unwrap();
+    drop(db);
+    let mut vault = Vault::open(dir.path()).unwrap();
+    assert_eq!(vault.history(CASE).unwrap().len(), 1);
+    assert_eq!(vault.lifecycle(CASE).unwrap().state, vault::State::Wip);
+    assert_eq!(vault.release(CASE, "").unwrap().revision, "A");
+}
+
+#[test]
+fn a_revision_set_by_hand_is_proposed_and_revisions_are_never_reused() {
+    let (dir, mut vault) = setup();
+    // The design says revision A already (set in SolidCraft before using the PDM).
+    vault.check_in(CASE, "v1").unwrap();
+    assert_eq!(vault.suggested_revision(CASE).unwrap(), "A");
+    vault.edit_properties(CASE, None, &[("revision", Some("D"))]).unwrap();
+    vault.check_in(CASE, "rev D by hand").unwrap();
+    assert_eq!(vault.suggested_revision(CASE).unwrap(), "D");
+    assert_eq!(vault.release_as(CASE, "D", "").unwrap().revision, "D");
+    vault.revise(CASE).unwrap();
+    assert_eq!(vault.suggested_revision(CASE).unwrap(), "E", "after a release: the next one");
+    assert!(matches!(vault.release_as(CASE, "d", ""), Err(Error::RevisionTaken(_, _))));
+    assert!(dir.path().join(CASE).is_file());
+}

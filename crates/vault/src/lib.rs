@@ -14,6 +14,7 @@
 //!
 //! Single user for now: there is no check-out or locking.
 
+mod lifecycle;
 mod store;
 
 use std::collections::{HashMap, HashSet};
@@ -24,11 +25,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+pub use lifecycle::{Lifecycle, Release, RevisionScheme, State, next_revision};
 pub use store::hash;
 use store::{Store, write_atomic};
 
 pub const PDM_DIR: &str = ".pdm";
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -58,6 +60,20 @@ pub enum Error {
     InvalidPath(String),
     #[error("folder {0} is not empty")]
     FolderNotEmpty(String),
+    #[error("{0} has changes that are not checked in; check in first")]
+    NotCheckedIn(String),
+    #[error("{0} is obsolete")]
+    Obsolete(String),
+    #[error("{0} is not released")]
+    NotReleased(String),
+    #[error("{0} is released as revision {1} already; revise it to work on the next revision")]
+    AlreadyReleased(String, String),
+    #[error("{0} was released as revision {1} before; choose another")]
+    RevisionTaken(String, String),
+    #[error("could not change the design: {0}")]
+    Design(String),
+    #[error("{0} is longer than SolidCraft allows (4 KiB)")]
+    TooLong(String),
     #[error("vault store is damaged: {0}")]
     Corrupt(String),
 }
@@ -111,6 +127,10 @@ pub struct Entry {
     /// For an untracked file: a missing document whose latest version has exactly this
     /// content, so the file was probably moved there (see [`Vault::relink`]).
     pub moved_from: Option<String>,
+    /// Tracked documents: work in progress, released or obsolete.
+    pub state: Option<State>,
+    /// The newest release, if any.
+    pub release: Option<Release>,
 }
 
 pub struct Vault {
@@ -219,6 +239,8 @@ impl Vault {
                 size: Some(meta.len()),
                 modified: meta.modified().ok(),
                 moved_from: None,
+                state: None,
+                release: None,
             });
         }
         tx.commit()?;
@@ -238,7 +260,16 @@ impl Vault {
             size: None,
             modified: None,
             moved_from: None,
+            state: None,
+            release: None,
         }));
+        let mut lifecycles = self.all_lifecycles()?;
+        for e in &mut entries {
+            if let Some((state, release)) = lifecycles.remove(&e.path) {
+                e.state = Some(state);
+                e.release = release;
+            }
+        }
         entries.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(entries)
     }
@@ -360,7 +391,13 @@ impl Vault {
                     };
                     // Only a design without unsaved changes gets a version; otherwise the
                     // edit joins those changes and is checked in with them.
-                    let version = if was_current { Some(self.check_in(&path, &comment)?.number) } else { None };
+                    let version = if was_current {
+                        let bytes = self.read_working(&path)?;
+                        let h = hash(&bytes);
+                        Some(self.record_with(&path, &bytes, &h, &comment, true)?.number)
+                    } else {
+                        None
+                    };
                     report.updated.push(LinkUpdate { path, version });
                 }
                 Err(e) => report.failed.push((path, e.to_string())),
@@ -524,7 +561,13 @@ impl Vault {
         })
     }
 
+    /// Records a new version. A released design with a new version is work in progress again,
+    /// unless `keep_state` (a version that only records updated links).
     fn record(&mut self, path: &str, bytes: &[u8], hash: &str, comment: &str) -> Result<Version> {
+        self.record_with(path, bytes, hash, comment, false)
+    }
+
+    fn record_with(&mut self, path: &str, bytes: &[u8], hash: &str, comment: &str, keep_state: bool) -> Result<Version> {
         self.store.put(hash, bytes)?;
         let info = scformat::read(Cursor::new(bytes)).ok();
         let thumbnail = match info.as_ref().and_then(|i| i.thumbnail_png.as_deref()) {
@@ -581,6 +624,9 @@ impl Vault {
                 version.thumbnail,
             ],
         )?;
+        if !keep_state {
+            tx.execute("UPDATE documents SET state = 'wip' WHERE id = ?1 AND state = 'released'", [doc])?;
+        }
         tx.commit()?;
         Ok(Version { number, ..version })
     }
@@ -597,6 +643,23 @@ impl Vault {
     fn version(&self, doc: i64, number: u32) -> Result<Option<Version>> {
         let sql = format!("{VERSION_SELECT} WHERE document_id = ?1 AND number = ?2");
         Ok(self.db.query_row(&sql, params![doc, number], version_from_row).optional()?)
+    }
+
+    /// Every document's state and newest release, by path.
+    fn all_lifecycles(&self) -> Result<HashMap<String, (State, Option<Release>)>> {
+        let mut stmt = self.db.prepare(
+            "SELECT d.path, d.state, r.revision, r.version, r.released_at, r.note
+             FROM documents d LEFT JOIN releases r
+               ON r.id = (SELECT MAX(id) FROM releases WHERE document_id = d.id)",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let release = match r.get::<_, Option<String>>(2)? {
+                Some(revision) => Some(Release { revision, version: r.get(3)?, released_at: r.get(4)?, note: r.get(5)? }),
+                None => None,
+            };
+            Ok((r.get::<_, String>(0)?, (State::parse(&r.get::<_, String>(1)?), release)))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Every document's latest version, by the document's current path.
@@ -674,6 +737,26 @@ fn migrate(db: &Connection) -> Result<()> {
                  hash     TEXT NOT NULL
              );
              PRAGMA user_version = 1;
+             COMMIT;",
+        )?;
+    }
+    if version < 2 {
+        db.execute_batch(
+            "BEGIN;
+             ALTER TABLE documents ADD COLUMN state TEXT NOT NULL DEFAULT 'wip';
+             CREATE TABLE releases (
+                 id          INTEGER PRIMARY KEY,
+                 document_id INTEGER NOT NULL REFERENCES documents(id),
+                 version     INTEGER NOT NULL,
+                 revision    TEXT NOT NULL,
+                 released_at INTEGER NOT NULL,
+                 note        TEXT NOT NULL
+             );
+             CREATE TABLE settings (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             PRAGMA user_version = 2;
              COMMIT;",
         )?;
     }
@@ -844,6 +927,6 @@ fn author() -> String {
     std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "unknown".into())
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }

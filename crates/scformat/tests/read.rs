@@ -259,3 +259,11 @@ fn compares_across_storage_types() {
     let boxed = container(&[("container.json", CONTAINER_JSON), ("document.json", &json)]).into_inner();
     assert!(scformat::compare::compare(&json, &boxed).unwrap().is_empty());
 }
+
+#[test]
+fn an_edit_that_changes_nothing_keeps_the_file() {
+    let boxed = container(&[("container.json", CONTAINER_JSON), ("document.json", TRICKY.as_bytes())]).into_inner();
+    assert_eq!(scformat::edit_document(&boxed, |_| {}).unwrap(), boxed);
+    let same = |doc: &mut serde_json::Value| doc["name"] = "bracket".into();
+    assert_eq!(scformat::edit_document(TRICKY.as_bytes(), same).unwrap(), TRICKY.as_bytes());
+}

@@ -219,6 +219,8 @@ pub fn read_document(bytes: &[u8]) -> Result<serde_json::Value> {
 /// document, so they read as stale: SolidCraft rebuilds the model on the next open (a cache
 /// miss, never an error). The geometry is unchanged by the edits the PDM makes, so the
 /// thumbnail stays correct.
+///
+/// An edit that leaves the document as it was returns the file unchanged.
 pub fn edit_document(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Result<Vec<u8>> {
     if bytes.len() as u64 > MAX_PART_BYTES {
         return Err(Error::TooLarge("design"));
@@ -227,7 +229,11 @@ pub fn edit_document(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) ->
         return edit_container(bytes, edit);
     }
     let mut doc: serde_json::Value = serde_json::from_slice(bytes)?;
+    let before = doc.clone();
     edit(&mut doc);
+    if doc == before {
+        return Ok(bytes.to_vec());
+    }
     let pretty = bytes.windows(2).take(4096).any(|w| w == b"\n ");
     let mut out = if pretty { serde_json::to_vec_pretty(&doc)? } else { serde_json::to_vec(&doc)? };
     if bytes.ends_with(b"\n") {
@@ -243,7 +249,11 @@ fn edit_container(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Re
         Err(zip::result::ZipError::FileNotFound) => return Err(Error::MissingPart("document.json")),
         Err(e) => return Err(e.into()),
     };
+    let before = doc.clone();
     edit(&mut doc);
+    if doc == before {
+        return Ok(bytes.to_vec());
+    }
     let document = serde_json::to_vec(&doc)?;
 
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::with_capacity(bytes.len())));

@@ -574,3 +574,55 @@ fn compares_a_version_with_the_working_file() {
     harness.run_steps(2);
     assert!(harness.query_by_label("Compare pi4-lid.solidcraft").is_none());
 }
+
+#[test]
+fn releases_a_design_from_the_details_panel() {
+    let (_dir, root, mut harness) = open_demo();
+    harness.state_mut().select("enclosure/pi4-lid.solidcraft");
+    settle(&mut harness);
+    // The lid says revision B already (set by hand): that is proposed.
+    harness.get_by_label("Release as B…").click();
+    harness.run_steps(3);
+    harness.get_by_label("Release B").click();
+    settle(&mut harness);
+
+    harness.get_by_label("Revision B");
+    assert_eq!(scformat::read_file(root.join("enclosure/pi4-lid.solidcraft")).unwrap().metadata.revision.as_deref(), Some("B"));
+    harness.get_by_label("Revise");
+    harness.get_by_label("Released  (1)");
+    screenshot(&mut harness, "11-released");
+    let lifecycle = Vault::open(&root).unwrap().lifecycle("enclosure/pi4-lid.solidcraft").unwrap();
+    // The file said B already: nothing to write, the release is v2 itself.
+    assert_eq!((lifecycle.state, lifecycle.releases[0].version), (vault::State::Released, 2));
+}
+
+#[test]
+fn edits_design_properties() {
+    let (_dir, root, mut harness) = open_demo();
+    harness.state_mut().select("enclosure/pi4-lid.solidcraft");
+    settle(&mut harness);
+    harness.get_by_label("Edit properties…").click();
+    harness.run_steps(3);
+    harness.get_by_label("Design properties");
+    // The dialog's part number field, right of its label (drawn last, above everything else).
+    let label = harness.query_all_by_label("Part number").last().unwrap().rect();
+    let field = egui::pos2(label.right() + 60.0, label.center().y);
+    harness.hover_at(field);
+    harness.step();
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton { pos: field, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        harness.step();
+    }
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.run_steps(2);
+    type_text(&mut harness, "PI4-LID-021");
+    screenshot(&mut harness, "12-properties");
+    harness.get_by_label("Save").click();
+    settle(&mut harness);
+
+    let info = scformat::read_file(root.join("enclosure/pi4-lid.solidcraft")).unwrap();
+    assert_eq!(info.metadata.part_number.as_deref(), Some("PI4-LID-021"));
+    assert_eq!(info.metadata.project.as_deref(), Some("Raspberry Pi 4 enclosure"), "untouched fields kept");
+    let history = Vault::open(&root).unwrap().history("enclosure/pi4-lid.solidcraft").unwrap();
+    assert_eq!((history[0].number, history[0].comment.as_str()), (3, "Edited properties"));
+}
