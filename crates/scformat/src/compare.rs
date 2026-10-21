@@ -134,9 +134,12 @@ fn compare_features(a: &Value, b: &Value, c: &mut Comparison) {
     let name = |f: &Value| f["name"].as_str().unwrap_or("").to_owned();
     let kind = |f: &Value| f["type"].as_str().unwrap_or("feature").to_owned();
 
+    // Same id but another type (a sketch where a fillet was) is not the same feature: removed
+    // and added. That happens between designs that were built separately.
+    let same = |id: &u64| matches!((ma.get(id), mb.get(id)), (Some(a), Some(b)) if kind(a) == kind(b));
     // In the newer version's order, then what was removed.
     for (id, after) in &fb {
-        let change = match ma.get(id) {
+        let change = match ma.get(id).filter(|_| same(id)) {
             None => FeatureChangeKind::Added,
             Some(before) => {
                 let renamed_from = (name(before) != name(after)).then(|| name(before));
@@ -155,12 +158,12 @@ fn compare_features(a: &Value, b: &Value, c: &mut Comparison) {
         c.features.push(FeatureChange { id: *id, name: name(after), kind: kind(after), change });
     }
     for (id, before) in &fa {
-        if !mb.contains_key(id) {
+        if !same(id) {
             c.features.push(FeatureChange { id: *id, name: name(before), kind: kind(before), change: FeatureChangeKind::Removed });
         }
     }
-    let kept_a: Vec<u64> = fa.iter().map(|(i, _)| *i).filter(|i| mb.contains_key(i)).collect();
-    let kept_b: Vec<u64> = fb.iter().map(|(i, _)| *i).filter(|i| ma.contains_key(i)).collect();
+    let kept_a: Vec<u64> = fa.iter().map(|(i, _)| *i).filter(|i| same(i)).collect();
+    let kept_b: Vec<u64> = fb.iter().map(|(i, _)| *i).filter(|i| same(i)).collect();
     c.features_reordered = kept_a != kept_b;
 }
 

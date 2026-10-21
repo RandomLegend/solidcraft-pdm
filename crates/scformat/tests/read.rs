@@ -267,3 +267,14 @@ fn an_edit_that_changes_nothing_keeps_the_file() {
     let same = |doc: &mut serde_json::Value| doc["name"] = "bracket".into();
     assert_eq!(scformat::edit_document(TRICKY.as_bytes(), same).unwrap(), TRICKY.as_bytes());
 }
+
+#[test]
+fn a_feature_of_another_type_under_the_same_id_is_removed_and_added() {
+    use scformat::compare::FeatureChangeKind;
+    let before = br#"{"format": "solidcraft/29", "features": [{"id": 1, "name": "Sketch2", "type": "sketch"}]}"#;
+    let after = br#"{"format": "solidcraft/29", "features": [{"id": 1, "name": "Fillet2", "type": "fillet", "radius": "1 mm"}]}"#;
+    let c = scformat::compare::compare(before, after).unwrap();
+    let got: Vec<_> = c.features.iter().map(|f| (f.name.as_str(), f.change.clone())).collect();
+    assert_eq!(got, [("Fillet2", FeatureChangeKind::Added), ("Sketch2", FeatureChangeKind::Removed)]);
+    assert!(!c.features_reordered);
+}

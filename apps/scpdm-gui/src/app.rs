@@ -2378,7 +2378,7 @@ fn comparison_ui(ui: &mut egui::Ui, c: &Comparison) {
             return;
         }
         egui::CollapsingHeader::new(RichText::new(format!("{title} ({})", list.len())).strong()).default_open(true).show(ui, |ui| {
-            egui::Grid::new(("compare", title)).num_columns(4).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+            egui::Grid::new(("compare", title)).num_columns(4).spacing([12.0, 4.0]).max_col_width(280.0).striped(true).show(ui, |ui| {
                 for ch in list {
                     let (mark, color) = match (&ch.before, &ch.after) {
                         (None, _) => ("+", ADDED),
@@ -2386,9 +2386,10 @@ fn comparison_ui(ui: &mut egui::Ui, c: &Comparison) {
                         _ => ("~", CHANGED),
                     };
                     ui.colored_label(color, format!("{mark} {}", ch.what));
-                    ui.add(egui::Label::new(RichText::new(ch.before.as_deref().unwrap_or("")).weak()).truncate());
+                    // Values wrap (the grid limits the column width): cut off, "boar…" says nothing.
+                    ui.add(egui::Label::new(RichText::new(ch.before.as_deref().unwrap_or("")).weak()).wrap());
                     ui.label(if ch.before.is_some() && ch.after.is_some() { "»" } else { "" });
-                    ui.add(egui::Label::new(ch.after.as_deref().unwrap_or("")).truncate());
+                    ui.add(egui::Label::new(ch.after.as_deref().unwrap_or("")).wrap());
                     ui.end_row();
                 }
             });

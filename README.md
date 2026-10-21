@@ -1,94 +1,73 @@
-# solidcraft-pdm
+<p align="center">
+  <img src="docs/images/cover.png" alt="SolidCraft PDM: folders, versions, thumbnails, search and releases for your SolidCraft designs" width="100%">
+</p>
 
-Product data management for [SolidCraft](https://github.com/tangency-labs/solidcraft) designs:
-browse `.solidcraft` files in folders, see their properties and thumbnails, and keep versions.
+<p align="center">
+  <a href="https://gitlab.com/randomlegend/solidcraft-pdm/-/releases"><img src="https://gitlab.com/randomlegend/solidcraft-pdm/-/badges/release.svg" alt="Latest release"></a>
+  <a href="https://gitlab.com/randomlegend/solidcraft-pdm/-/pipelines"><img src="https://gitlab.com/randomlegend/solidcraft-pdm/badges/main/pipeline.svg" alt="Pipeline"></a>
+</p>
+
+**SolidCraft PDM** keeps your [SolidCraft](https://github.com/tangency-labs/solidcraft) designs
+in order: browse them by folder with big thumbnails, find anything with a fuzzy search, check in
+versions, see what changed, release revisions, and move files without breaking the links between
+them. Your designs stay ordinary files in an ordinary folder; SolidCraft opens and saves them as
+before. For one person, native on Linux, written in Rust.
+
+## Features
+
+<img src="docs/images/vault.png" alt="The vault: designs with thumbnails, a released design with its history" width="100%">
+
+- **Versions without ceremony.** Any folder becomes a vault. Saving in SolidCraft shows up as
+  *Modified*; *Check in* records a version with a comment and a thumbnail. Restore any version
+  (unsaved work is checked in first, so nothing is lost), save a copy of it, or open it
+  read-only.
+- **Revisions.** Release a design as A, B, C … (or 01, 02 …): the revision is written into the
+  design and the version recorded. Designs are *in progress*, *released* or *obsolete*.
+- **Properties.** Part number, description, project and more, edited right in the file, the
+  same ones SolidCraft shows under *Design Properties*.
+
+<img src="docs/images/search.png" alt="Fuzzy search through every folder" width="100%">
+
+- **Find anything.** The search (Ctrl+F) looks through the whole vault: file names, design names,
+  part numbers, descriptions, fuzzy and ranked, with the matching letters highlighted.
+
+<img src="docs/images/compare.png" alt="Comparing two versions of a design" width="100%">
+
+- **See what changed** between any two versions: properties, parameters (`height: 24 mm » 32
+  mm`), features (added, removed, renamed, suppressed, which settings), components and links.
+
+<img src="docs/images/folder.png" alt="A folder with designs and a reference image" width="100%">
+
+- **Folders that fit how you work.** Drag designs between folders; links from assemblies to their
+  parts are updated. Reference images (PNG, JPEG, WebP) show up next to the designs in their
+  folder.
+- **Made for SolidCraft.** Double-click opens a design in SolidCraft as installed, also as an
+  AppImage; *+ New design* starts one. The interface scales up to 250 % for large screens.
+
+More in the [guide](docs/guide.md).
+
+## Install
+
+Download the AppImage from the [releases](https://gitlab.com/randomlegend/solidcraft-pdm/-/releases)
+(x86_64 Linux, glibc 2.36 or newer), make it executable and start it:
 
 ```sh
-cargo run --release -p scpdm-gui -- ~/CAD     # desktop app (opens or offers to create a vault)
-cargo run --release -p scpdm -- --help        # command line
+chmod +x SolidCraft-PDM-*-x86_64.AppImage
+./SolidCraft-PDM-*-x86_64.AppImage ~/CAD
 ```
 
-## Download
+Point it at the folder with your designs; it offers to make it a vault (a hidden `.pdm` folder,
+your files are not changed). *Vault > Settings > Add SolidCraft PDM to the application menu* puts
+it into your launcher, with its icon.
 
-CI on gitlab.com builds these (pipeline → job → *Browse* / *Download* artifacts):
-
-- **Linux:** `SolidCraft-PDM-<version>-x86_64.AppImage` (job `linux:appimage`; glibc 2.36 or
-  newer). Make it executable and run it; *Vault > Settings > Add SolidCraft PDM to the
-  application menu* puts it into your launcher with its icon (and the dock icon on Wayland).
-  `SolidCraft-PDM-….AppImage cli status` runs the command line. Build one locally with
-  `packaging/linux/build-appimage.sh`.
-- **Windows:** `solidcraft-pdm.exe`, `scpdm.exe` and an installer (job `windows:build`, started
-  by hand); see `docs/windows.md`.
-
-## Concepts
-
-- A **vault** is a folder of designs with a hidden `.pdm/` folder. Your files stay ordinary files
-  that SolidCraft opens and saves as before.
-- **Check in** records a file's current content as its next version (v1, v2, …) with a comment.
-- Each design is **Untracked**, **Up to date**, **Modified** (changed since its last version)
-  or **Missing** (tracked, but the file is gone).
-- **Restore** puts an earlier version back. It never loses work: changes not checked in yet are
-  checked in first, and the restore itself is recorded as a new version.
-- **Lifecycle:** a tracked design is *in progress*, *released* or *obsolete*. *Release* gives it
-  a revision (A, B, C … without I, O, Q, S, X, Z, or 01, 02 … per vault; a design never released
-  here proposes the revision its file already has), writes it into the design's Revision
-  property and records which version that revision is. Checking in a released design again
-  starts work on the next revision. Released files are not made read-only (SolidCraft saves by
-  renaming a new file over the old one): a released design that changed is shown as such.
-- **Edit properties…** writes name, part number, revision, project, description, author,
-  organization and licence into the design file (SolidCraft's *Design Properties*), and checks
-  that in if you like.
-- **Move / rename** inside the PDM keeps the history, and updates the links: in designs that
-  link to the moved one, and the moved design's own relative links. An updated design that was
-  up to date gets a new version saying why; one with changes not checked in yet keeps them and
-  gets no version of its own. A file moved in the file manager is
-  recognised by its content and can be relinked to its history.
-
-## Desktop app
-
-- **Left:** status filters and the folder tree (also empty folders). *+ New folder* creates one in
-  the selected folder; right-click a folder for a subfolder, *Show in file manager* or *Delete*
-  (empty folders only). Drag designs onto a folder, or use *Move to* in a design's right-click
-  menu, to move them with their history.
-- **Middle:** designs, and in folder views also the folder's reference images (PNG, JPEG,
-  WebP): shown with a thumbnail, opened in your image viewer on double-click, moved like
-  designs, but not versioned. Right-click a row, or below the list, for *New design here…*.
-  The search bar (Ctrl+F, Esc clears) searches the whole vault, whatever folder is
-  selected: fuzzy and ranked, each word matched within the file name, design name, part number,
-  description, project or folder, with the matched letters highlighted. The slider sets the
-  thumbnail size.
-- **Right:** the selected design's properties, links (*Uses* / *Used in*), check-in and history
-  with each version's thumbnail.
-
-- **Top:** *+ New design* creates an empty design (name, folder, optional part number and
-  description), checks it in as v1 and opens it in SolidCraft. *View* chooses the list columns
-  (also by right-clicking the list header) and the interface size (also Ctrl + / Ctrl - /
-  Ctrl 0; more presets in Vault > Settings). The interface starts at 150 %.
-- **Compare…** on a version in the history shows what changed against the working file (or
-  between any two versions): properties, parameters, features (added, removed, renamed,
-  suppressed, which settings), components, links, and which other parts of the design differ.
-- **Double-click** a design, its preview or the working version in the history to open it in
-  SolidCraft; an older version opens as a read-only copy (to work on it, restore it first).
-
-The vault is rescanned every few seconds while the window has focus, and when it regains focus,
-so saving in SolidCraft shows up as *Modified* by itself.
-
-New designs are written as plain JSON in format 1, which every SolidCraft release opens and
-upgrades (checked with SolidCraft 0.18.3: it saves such a file as a `solidcraft/29` container
-and keeps its properties).
-
-**Opening designs.** Double-click opens a design in SolidCraft as installed: the app finds
-SolidCraft's desktop entry (the one the AppImage installs on its first run, or one from Gear
-Lever, AppImageLauncher, appimaged, Flatpak or a package) and runs its `Exec` line, else
-`solidcraft` on `PATH`. It does not use `xdg-open`: the AppImage registers no MIME type for
-`*.solidcraft`, so `xdg-open` guesses from the contents (ZIP or JSON) and may pick an unrelated
-program. Vault > Settings shows what was found and takes another program or AppImage.
+Windows 10 / 11: prepared, built by hand in CI; see [docs/windows.md](docs/windows.md).
 
 ## Command line
 
+The same vault from a terminal: `scpdm` (in the AppImage: `SolidCraft-PDM-….AppImage cli …`).
+
 ```text
 scpdm init [dir]                 make a folder a vault
-scpdm new <file> [--part-number P] [--description D]   create an empty design as v1
 scpdm status                     untracked / modified / missing designs
 scpdm ci <files…> -m "comment"   check in
 scpdm log <file>                 versions, newest first
@@ -99,58 +78,59 @@ scpdm mv <from> <to>             move or rename, keeping history and updating li
 scpdm release <file> [-m note] [--revision R]   release (revision written into the design)
 scpdm revise <file> / obsolete <file> [--undo]  back to work in progress / obsolete
 scpdm props <file> [--set key=value]… [--name N] [--check-in]  show or edit design properties
+scpdm new <file> [--part-number P] [--description D]   create an empty design as v1
 scpdm scheme [letters|numbers]   the vault's revision scheme
 scpdm relink <missing> <to>      attach history to a file moved outside the PDM
 scpdm ls [dir] / info <file> / thumb <file> <out.png>
 ```
 
-## Layout
+## Building
+
+Rust 1.93 or newer:
+
+```sh
+cargo run --release -p scpdm-gui -- ~/CAD     # the desktop app
+cargo run --release -p scpdm -- --help        # the command line
+cargo test --workspace                        # the tests (the GUI tests drive the real window)
+packaging/linux/build-appimage.sh             # dist/SolidCraft-PDM-<version>-x86_64.AppImage
+```
 
 | Path | What |
 |---|---|
-| `crates/scformat` | Reads `.solidcraft` files (ZIP container or plain JSON): properties, components, links, thumbnail |
-| `crates/vault` | The vault: SQLite index (`.pdm/vault.db`) and content-addressed store (`.pdm/objects/`) |
-| `apps/scpdm` | Command-line tool |
+| `crates/scformat` | SolidCraft design files (container or plain JSON): properties, links, thumbnail; exact edits; comparing versions |
+| `crates/vault` | The vault: SQLite index (`.pdm/vault.db`), content-addressed store (`.pdm/objects/`), lifecycle |
+| `apps/scpdm` | Command line |
 | `apps/scpdm-gui` | Desktop app (egui), binary `solidcraft-pdm` |
-| `docs/windows.md` | Building for Windows 10 / 11, and what differs there |
-| `packaging/linux/` | AppImage: build script, `AppRun`, desktop entry |
-| `packaging/windows/` | Installer (Inno Setup) |
-| `assets/` | Icon: `solidcraft-pdm.svg` is the source; PNGs and `.ico` from `packaging/make-icons.py` |
-| `.gitlab-ci.yml` | Tests on Linux; AppImage and Windows builds |
+| `packaging/` | AppImage, Windows installer, icons (`make-icons.py`; the source is `assets/solidcraft-pdm.svg`) |
+| `docs/` | [Guide](docs/guide.md), [Windows](docs/windows.md), README images (`make-screenshots.sh`) |
 
-Tests: `cargo test --workspace`. The GUI test drives the real window over a demo vault;
-`SCPDM_SCREENSHOTS=<dir> cargo test -p scpdm-gui --test ui` also saves screenshots there.
+## Releasing
+
+1. Set the version in `Cargo.toml` (`[workspace.package]`) and add its section to
+   [CHANGELOG.md](CHANGELOG.md) (`## 0.2.0 — date`).
+2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+
+CI then builds the AppImage, stores it in the project's package registry and publishes a
+release with the changelog section as its notes. A tag whose version does not match
+`Cargo.toml`, or without a changelog section, fails the pipeline instead.
 
 ## Design decisions
 
 - **Own reader, no dependency on SolidCraft's crates.** They need a newer Rust, pull in the
   geometry kernel, and would tie the PDM to one SolidCraft release. The parts a PDM needs are
-  documented and stable (`docs/design-container.md`, `docs/book/src/guide/files.md` upstream):
-  - container: ZIP with `container.json`, `document.json`, `blobs/<sha256>.<ext>`, `cache/thumbnail.png`
-  - `metadata`: `project`, `part_number`, `revision`, `author`, `organization`, `description`, `license`
-  - `links`: component id → `{path, feature}`, the path relative to the design's folder
-- **Careful writes to design files.** The PDM changes a design only for link updates and
-  property edits (`scformat::edit_document`): the other entries of a container are copied byte
-  for byte, key order and every number survive exactly, writes are atomic. SolidCraft's model
-  cache in a container then no longer matches and is rebuilt on the next open (a cache miss,
-  never an error). `crates/scformat/tests/solidcraft_cli.rs` has SolidCraft itself re-save what
-  the PDM wrote (set `SOLIDCRAFT_CLI` to an extracted AppImage's `usr/bin/solidcraft-cli`).
-- **Versions are whole-file copies, stored once per distinct content** (SHA-256, like SolidCraft's
-  own blobs) and verified on read. Objects are read-only on disk.
+  documented and stable (`docs/design-container.md` and `docs/book/src/guide/files.md` in
+  SolidCraft's repository): the container's `document.json` and `cache/thumbnail.png`, the
+  `metadata` design properties, and `links` between designs.
+- **Careful writes to design files**, only for link updates, properties and releases: the other
+  entries of a container are copied byte for byte, key order and every number survive exactly,
+  writes are atomic, and an edit that changes nothing leaves the file alone.
+  `crates/scformat/tests/solidcraft_cli.rs` has SolidCraft itself re-save what the PDM wrote.
+- **Versions are whole-file copies, stored once per distinct content** (SHA-256) and verified on
+  read.
 - **Single user, by design.** One person, one vault folder; no check-out, locking or server.
-  SQLite runs in WAL mode so the app and the CLI can be used side by side.
-- Fixtures in `crates/scformat/tests/fixtures` come from the SolidCraft repository
-  (MIT/Apache-2.0), commit `728f753`.
 
-## Roadmap
+## Credits
 
-1. ~~Read design files~~
-2. ~~Vault, versions, restore, move/relink~~
-3. ~~Desktop GUI~~
-4. ~~Update links in other designs when a linked file is moved or renamed~~
-5. ~~Compare two versions (properties, parameters, features)~~
-6. ~~Lifecycle states (WIP → released) and a revision scheme; edit design properties~~
-7. ~~Upgrade egui~~ (to 0.35, the newest for Rust 1.93; 0.36+ need Rust 1.95), ~~packaging~~
-   (AppImage with icons and an *Add to application menu* button; Windows icon, installer and a
-   manual CI job, not run yet — see `docs/windows.md`)
-8. ~~Multi-user~~: not planned. SolidCraft PDM is a tool for one person.
+The test fixtures and the designs in the screenshots are SolidCraft's own sample designs
+(MIT/Apache-2.0, from [tangency-labs/solidcraft](https://github.com/tangency-labs/solidcraft));
+their thumbnails were rendered by SolidCraft.

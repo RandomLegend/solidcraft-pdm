@@ -1,14 +1,20 @@
 # CI for gitlab.com:
 # - linux:test       the tests, on every push
-# - linux:appimage   SolidCraft-PDM-<version>-x86_64.AppImage, automatically on the default branch
-#                    and tags, by hand on other branches
-# - windows:build    solidcraft-pdm.exe, scpdm.exe, the installer and the tests on Windows: only when started
-#                    by hand (play button in the pipeline), since it takes long; the pipeline
-#                    does not wait for it
+# - linux:appimage   SolidCraft-PDM-<version>-x86_64.AppImage, automatically on the default
+#                    branch, by hand on other branches (kept 30 days)
+# - windows:build    solidcraft-pdm.exe, scpdm.exe, the installer and the tests on Windows: only when
+#                    started by hand (play button in the pipeline), since it takes long; the
+#                    pipeline does not wait for it
+#
+# A tag vX.Y.Z (see "Releasing" in the README) makes a GitLab release:
+# - release:check    the tag matches the version in Cargo.toml and CHANGELOG.md has its section
+# - release:appimage the AppImage, kept for good
+# - release          the release, with the changelog section as notes and the AppImage as download
 
 stages:
   - test
   - build
+  - release
 
 variables:
   RUST_VERSION: "1.93.1"
@@ -29,8 +35,9 @@ linux:test:
     - rustc --version
     - cargo test --workspace --locked
 
-linux:appimage:
+.appimage:
   stage: build
+  # Built on Debian bookworm: the AppImage needs glibc 2.36 or newer (distributions from 2022 on).
   image: rust:1.93-bookworm
   needs: ["linux:test"]
   variables:
@@ -40,19 +47,88 @@ linux:appimage:
     paths:
       - .cargo-home/registry/
       - target/
+  script:
+    - packaging/linux/build-appimage.sh dist
+
+linux:appimage:
+  extends: .appimage
   rules:
     - if: $CI_COMMIT_TAG
+      when: never
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - when: manual
       allow_failure: true
-  script:
-    # Built on Debian bookworm: the AppImage needs glibc 2.36 or newer (distributions from 2022 on).
-    - packaging/linux/build-appimage.sh dist
   artifacts:
     name: solidcraft-pdm-linux-$CI_COMMIT_SHORT_SHA
     paths:
       - dist/*.AppImage
     expire_in: 30 days
+
+release:check:
+  stage: test
+  image: alpine:3.20
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  script:
+    - version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+    - |
+      if [ "$CI_COMMIT_TAG" != "v$version" ]; then
+        echo "Tag $CI_COMMIT_TAG does not match the version in Cargo.toml ($version)."
+        exit 1
+      fi
+    # The changelog section "## <version> …" up to the next "## ".
+    - awk -v v="$version" 'index($0, "## " v) == 1 { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md > release-notes.md
+    - |
+      if ! grep -q '[^[:space:]]' release-notes.md; then
+        echo "CHANGELOG.md has no section for $version."
+        exit 1
+      fi
+    - cat release-notes.md
+  artifacts:
+    paths:
+      - release-notes.md
+
+release:appimage:
+  extends: .appimage
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  needs: ["linux:test", "release:check"]
+  script:
+    - packaging/linux/build-appimage.sh dist
+    - echo "APPIMAGE_JOB_ID=$CI_JOB_ID" > appimage.env
+    - echo "APPIMAGE_FILE=$(basename dist/*.AppImage)" >> appimage.env
+  artifacts:
+    name: solidcraft-pdm-linux-$CI_COMMIT_TAG
+    paths:
+      - dist/*.AppImage
+    expire_in: never
+    reports:
+      dotenv: appimage.env
+
+release:
+  stage: release
+  image: alpine:3.20
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  needs:
+    - job: release:check
+      artifacts: true
+    - job: release:appimage
+      artifacts: false
+  script:
+    - apk add --no-cache curl jq
+    - url="$CI_PROJECT_URL/-/jobs/$APPIMAGE_JOB_ID/artifacts/raw/dist/$APPIMAGE_FILE"
+    - |
+      jq -n --arg tag "$CI_COMMIT_TAG" --arg name "SolidCraft PDM ${CI_COMMIT_TAG#v}" \
+        --rawfile notes release-notes.md --arg file "$APPIMAGE_FILE" --arg url "$url" \
+        '{tag_name: $tag, name: $name, description: $notes,
+          assets: {links: [{name: $file, url: $url, link_type: "package", direct_asset_path: ("/" + $file)}]}}' \
+        > release.json
+    - cat release.json
+    - |
+      curl --fail-with-body --request POST --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        --header "Content-Type: application/json" --data @release.json \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
 
 windows:build:
   stage: build
