@@ -11,3 +11,6 @@ scformat = { workspace = true }
 vault = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
+remote = { workspace = true }
+protocol = { workspace = true }
+rpassword = { workspace = true }

@@ -3748,6 +3748,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "protocol",
+ "remote",
+ "rpassword",
  "scformat",
  "vault",
 ]

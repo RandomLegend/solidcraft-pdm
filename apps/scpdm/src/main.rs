@@ -17,6 +17,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Work with a server vault in a workspace (see `scpdm remote --help`)
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
     /// Show a design's properties, contents and links
     Info { file: PathBuf },
     /// List every design below a folder (no vault needed)
@@ -103,6 +108,7 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result {
     match command {
+        Command::Remote { command } => remote_command(command),
         Command::Info { file } => info(&file),
         Command::Ls { dir } => ls(dir.as_deref().unwrap_or(Path::new("."))),
         Command::Thumb { file, out } => thumb(&file, &out),
@@ -484,4 +490,188 @@ fn encoding(d: &DesignInfo) -> &'static str {
 
 fn yes_no(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
+}
+
+#[derive(Subcommand)]
+enum RemoteCommand {
+    /// The vaults you may use on a server
+    Vaults { url: String, user: String },
+    /// Make a folder a workspace of a server vault
+    Join { url: String, user: String, vault: String, dir: PathBuf },
+    /// Log in again (in a workspace)
+    Login,
+    /// Designs and how they relate to the server
+    Status,
+    /// Fetch the latest versions (or with --all: everything new or newer)
+    Get {
+        files: Vec<PathBuf>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Check out (lock) to change a design
+    Checkout { file: PathBuf },
+    /// Give a check-out back (--discard: also put the fetched version back)
+    Undo {
+        file: PathBuf,
+        #[arg(long)]
+        discard: bool,
+    },
+    /// Upload a checked-out design as the next version
+    #[command(visible_alias = "ci")]
+    Checkin {
+        file: PathBuf,
+        #[arg(short, long, default_value = "")]
+        message: String,
+        /// Keep it checked out to go on working
+        #[arg(long)]
+        keep: bool,
+    },
+    /// Put a new design onto the server
+    Add {
+        file: PathBuf,
+        #[arg(short, long, default_value = "")]
+        message: String,
+    },
+    /// Move or rename on the server (links are updated)
+    Mv { from: PathBuf, to: PathBuf },
+    /// Release a design on the server
+    Release {
+        file: PathBuf,
+        #[arg(long)]
+        revision: String,
+        #[arg(short, long, default_value = "")]
+        message: String,
+    },
+    /// A design's versions on the server
+    Log { file: PathBuf },
+}
+
+/// The password: from $SCPDM_PASSWORD (scripts), else asked for without showing it.
+fn ask_password(user: &str) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    if let Ok(password) = std::env::var("SCPDM_PASSWORD") {
+        return Ok(password);
+    }
+    Ok(rpassword::prompt_password(format!("Password for {user}: "))?)
+}
+
+fn remote_command(command: RemoteCommand) -> Result {
+    use remote::{Client, RemoteStatus, Workspace};
+    match command {
+        RemoteCommand::Vaults { url, user } => {
+            let mut client = Client::new(&url, None);
+            client.login(&user, &ask_password(&user)?)?;
+            for v in client.vaults()? {
+                println!("{:<24} {:?}", v.name, v.access);
+            }
+            return Ok(());
+        }
+        RemoteCommand::Join { url, user, vault, dir } => {
+            let mut client = Client::new(&url, None);
+            client.login(&user, &ask_password(&user)?)?;
+            let ws = Workspace::create(&dir, client, &user, &vault)?;
+            println!("{} is a workspace of {vault} on {url}", ws.root().display());
+            return Ok(());
+        }
+        _ => {}
+    }
+    let mut ws = Workspace::discover(Path::new("."))?;
+    match command {
+        RemoteCommand::Vaults { .. } | RemoteCommand::Join { .. } => unreachable!("handled above"),
+        RemoteCommand::Login => {
+            let user = ws.user().to_owned();
+            let mut client = Client::new(ws.client().url(), None);
+            client.login(&user, &ask_password(&user)?)?;
+            ws.set_client(client, &user)?;
+            println!("logged in as {user}");
+        }
+        RemoteCommand::Status => {
+            let status = ws.status()?;
+            if let Some(why) = &status.offline {
+                println!("offline ({why}): as last seen");
+            }
+            for (from, to) in &status.followed_moves {
+                println!("moved on the server: {from} -> {to}");
+            }
+            for e in &status.designs {
+                let version = e.server.as_ref().map_or(String::new(), |s| format!(" v{}", s.latest.number));
+                let label = match &e.status {
+                    RemoteStatus::UpToDate => continue,
+                    RemoteStatus::NotDownloaded => "not here".to_owned(),
+                    RemoteStatus::NewerOnServer => "newer on server".to_owned(),
+                    RemoteStatus::CheckedOut { modified: true } => "checked out, changed".to_owned(),
+                    RemoteStatus::CheckedOut { modified: false } => "checked out".to_owned(),
+                    RemoteStatus::CheckedOutByOther(user) => format!("checked out by {user}"),
+                    RemoteStatus::ChangedWithoutCheckout => "changed, not checked out".to_owned(),
+                    RemoteStatus::Conflict => "CONFLICT: changed here and on the server".to_owned(),
+                    RemoteStatus::LocalOnly => "new here (add it)".to_owned(),
+                    RemoteStatus::RemovedOnServer => "no longer on the server".to_owned(),
+                };
+                println!("{label:<40} {}{version}", e.path);
+            }
+            let current = status.designs.iter().filter(|e| e.status == RemoteStatus::UpToDate).count();
+            println!("{} designs, {current} up to date", status.designs.len());
+        }
+        RemoteCommand::Get { files, all } => {
+            let mut paths: Vec<String> = files.iter().map(|f| ws.relative(f)).collect::<std::result::Result<_, _>>()?;
+            if all {
+                let status = ws.status()?;
+                paths.extend(
+                    status
+                        .designs
+                        .iter()
+                        .filter(|e| matches!(e.status, RemoteStatus::NotDownloaded | RemoteStatus::NewerOnServer))
+                        .map(|e| e.path.clone()),
+                );
+                paths.extend(status.images.iter().filter(|i| i.server.is_some() && i.server != i.local).map(|i| i.path.clone()));
+            }
+            for path in paths {
+                match ws.get(&path) {
+                    Ok(()) => println!("got {path}"),
+                    Err(e) => eprintln!("{path}: {e}"),
+                }
+            }
+        }
+        RemoteCommand::Checkout { file } => {
+            let path = ws.relative(&file)?;
+            ws.checkout(&path)?;
+            println!("{path}: checked out");
+        }
+        RemoteCommand::Undo { file, discard } => {
+            let path = ws.relative(&file)?;
+            ws.undo_checkout(&path, discard)?;
+            println!("{path}: no longer checked out");
+        }
+        RemoteCommand::Checkin { file, message, keep } => {
+            let path = ws.relative(&file)?;
+            let v = ws.checkin(&path, &message, keep)?;
+            println!("{path}: v{}", v.number);
+        }
+        RemoteCommand::Add { file, message } => {
+            let path = ws.relative(&file)?;
+            let v = ws.add(&path, &message)?;
+            println!("{path}: v{}", v.number);
+        }
+        RemoteCommand::Mv { from, to } => {
+            let (from, to) = (ws.relative(&from)?, ws.relative(&to)?);
+            let updated = ws.move_file(&from, &to)?;
+            println!("{from} -> {to}");
+            for u in updated {
+                println!("  links updated in {u}");
+            }
+        }
+        RemoteCommand::Release { file, revision, message } => {
+            let path = ws.relative(&file)?;
+            let done = ws.act_on_design(&path, protocol::Action::Release { path: path.clone(), revision, note: message })?;
+            if let Some(r) = done.release {
+                println!("{path}: released revision {} (v{})", r.revision, r.version);
+            }
+        }
+        RemoteCommand::Log { file } => {
+            let path = ws.relative(&file)?;
+            for v in ws.history(&path)? {
+                println!("v{:<4} {}  {:<10} {}", v.number, date(v.created_at), v.author, if v.comment.is_empty() { "-" } else { &v.comment });
+            }
+        }
+    }
+    Ok(())
 }
