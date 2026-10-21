@@ -113,10 +113,16 @@ release:
   needs:
     - job: release:check
       artifacts: true
+    # Its dotenv report (the AppImage's job and file) is an artifact: it must be passed.
     - job: release:appimage
-      artifacts: false
+      artifacts: true
   script:
     - apk add --no-cache curl jq
+    - |
+      if [ -z "${APPIMAGE_JOB_ID:-}" ] || [ -z "${APPIMAGE_FILE:-}" ]; then
+        echo "release:appimage did not pass APPIMAGE_JOB_ID and APPIMAGE_FILE."
+        exit 1
+      fi
     - url="$CI_PROJECT_URL/-/jobs/$APPIMAGE_JOB_ID/artifacts/raw/dist/$APPIMAGE_FILE"
     - |
       jq -n --arg tag "$CI_COMMIT_TAG" --arg name "SolidCraft PDM ${CI_COMMIT_TAG#v}" \
