@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 scformat = { workspace = true }
 vault = { workspace = true }
+remote = { workspace = true }
+protocol = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -23,6 +25,7 @@ rfd = { workspace = true }
 nucleo-matcher = { workspace = true }
 
 [dev-dependencies]
+scpdm-server = { path = "../scpdm-server" }
 egui_kittest = { workspace = true }
 tempfile = { workspace = true }
 zip = { workspace = true }

@@ -13,8 +13,9 @@ use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 use vault::{Entry, Status, Vault, Version};
 
+use crate::backend::{Backend, OpenError};
 use crate::launcher::{self, Launcher};
-use crate::scan::{self, ImageFile, Info, Scan};
+use crate::scan::{self, ImageFile, Info, RemoteInfo, Scan};
 use crate::search::{Haystack, Search};
 use scformat::compare::{Change, Comparison, FeatureChangeKind};
 
@@ -43,6 +44,8 @@ struct Settings {
     /// Interface size (egui zoom factor; Ctrl + and Ctrl - change it too). 150 % by default:
     /// egui's 100 % is small on large or high-resolution screens.
     zoom: f32,
+    /// Servers connected to before (address, user); passwords are never kept.
+    servers: Vec<(String, String)>,
 }
 
 impl Default for Settings {
@@ -54,6 +57,7 @@ impl Default for Settings {
             thumb_width: 160.0,
             hidden_columns: Vec::new(),
             zoom: 1.5,
+            servers: Vec::new(),
         }
     }
 }
@@ -98,8 +102,10 @@ impl ListColumn {
         }
     }
 
-    fn width(self) -> f32 {
+    /// `remote`: a server vault's statuses are longer ("Checked out by anna").
+    fn width(self, remote: bool) -> f32 {
         match self {
+            ListColumn::Status if remote => 150.0,
             ListColumn::Status => 96.0,
             ListColumn::State => 104.0,
             ListColumn::Version => 40.0,
@@ -150,6 +156,10 @@ enum Dialog {
     NewFolder { parent: String, name: String },
     NewDesign { folder: String, name: String, part_number: String, description: String, open: bool },
     Compare { path: String, from: Side, to: Side, result: Option<Result<Comparison, String>> },
+    /// The workspace's login expired.
+    Login { password: String, error: Option<String> },
+    /// Connect to a server and make a workspace of one of its vaults.
+    Connect(ConnectForm),
     Release { path: String, revision: String, note: String },
     Properties { path: String, name: String, values: [String; 7], check_in: bool, comment: String },
 }
@@ -164,6 +174,19 @@ const EDITABLE: [(&str, &str); 7] = [
     ("organization", "Organization"),
     ("license", "License"),
 ];
+
+/// Connecting to a server: the login, then a vault and a folder for its workspace.
+struct ConnectForm {
+    url: String,
+    user: String,
+    password: String,
+    /// Logged in: the session and the vaults this user may use.
+    client: Option<remote::Client>,
+    vaults: Vec<protocol::VaultInfo>,
+    vault: String,
+    folder: String,
+    error: Option<String>,
+}
 
 /// One side of a comparison.
 #[derive(Clone, Copy, PartialEq)]
@@ -204,6 +227,19 @@ enum Action {
     OpenVersion { path: String, version: Version },
     AskNewDesign(String),
     AskRelease(String),
+    AskConnect,
+    ConnectServer,
+    JoinVault,
+    Relogin(String),
+    Get(String),
+    GetAll,
+    Checkout(String),
+    UndoCheckout { path: String, discard: bool },
+    RemoteCheckin { path: String, comment: String, keep: bool },
+    AddToServer { path: String, comment: String },
+    UploadImage(String),
+    /// A conflict: keep a copy of the local file elsewhere, then get the latest version.
+    KeepCopyAndGet(String),
     Release { path: String, revision: String, note: String },
     Revise(String),
     SetObsolete { path: String, obsolete: bool },
@@ -218,8 +254,12 @@ enum Action {
 
 pub struct App {
     settings: Settings,
-    vault: Option<Vault>,
+    /// The open local vault or workspace of a server vault.
+    backend: Option<Backend>,
     entries: Vec<Entry>,
+    /// In a workspace: each file and the server, by path; why the server is not reachable.
+    remote: HashMap<String, RemoteInfo>,
+    offline: Option<String>,
     /// Working files' properties, by content hash.
     infos: HashMap<String, Info>,
     /// Thumbnail PNGs by key (content hash for working files, object hash for versions).
@@ -261,8 +301,10 @@ impl App {
         }
         let mut app = App {
             settings,
-            vault: None,
+            backend: None,
             entries: Vec::new(),
+            remote: HashMap::new(),
+            offline: None,
             infos: HashMap::new(),
             thumbs: HashMap::new(),
             folders: Vec::new(),
@@ -289,7 +331,8 @@ impl App {
         match start {
             Some(dir) => app.open_vault(ctx, dir),
             None => {
-                if let Some(last) = app.settings.last_vault.clone().filter(|p| p.join(vault::PDM_DIR).is_dir()) {
+                let openable = |p: &PathBuf| p.join(vault::PDM_DIR).is_dir() || remote::Workspace::is_workspace(p);
+                if let Some(last) = app.settings.last_vault.clone().filter(openable) {
                     app.open_vault(ctx, last);
                 }
             }
@@ -319,19 +362,18 @@ impl App {
     // ---- state ----
 
     fn open_vault(&mut self, ctx: &egui::Context, dir: PathBuf) {
-        match Vault::discover(&dir) {
-            Ok(vault) => {
-                let root = vault.root().to_path_buf();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                    "{} — SolidCraft PDM",
-                    root.file_name().map_or(root.display().to_string(), |n| n.to_string_lossy().into_owned())
-                )));
+        match Backend::open(&dir) {
+            Ok(backend) => {
+                let root = backend.root();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{} — SolidCraft PDM", backend.title())));
                 self.settings.recent.retain(|p| *p != root);
                 self.settings.recent.insert(0, root.clone());
                 self.settings.recent.truncate(MAX_RECENT);
                 self.settings.last_vault = Some(root);
-                self.vault = Some(vault);
+                self.backend = Some(backend);
                 self.entries.clear();
+                self.remote.clear();
+                self.offline = None;
                 self.infos.clear();
                 self.thumbs.clear();
                 self.folders.clear();
@@ -345,20 +387,23 @@ impl App {
                 self.message = None;
                 self.start_scan(ctx);
             }
-            Err(vault::Error::NotAVault(_)) => self.dialog = Some(Dialog::MakeVault { dir }),
-            Err(e) => self.error(e),
+            Err(OpenError::NotAVault) => self.dialog = Some(Dialog::MakeVault { dir }),
+            Err(OpenError::Other(e)) => self.error(e),
         }
     }
 
     fn start_scan(&mut self, ctx: &egui::Context) {
-        let Some(vault) = &self.vault else { return };
+        let Some(backend) = &self.backend else { return };
         self.last_scan = Instant::now();
         if self.scan.is_some() {
             self.rescan = true;
             return;
         }
         let known = self.infos.keys().chain(self.image_sizes.keys()).cloned().collect();
-        self.scan = Some(scan::spawn(vault.root().to_path_buf(), known, ctx.clone()));
+        self.scan = Some(match backend.shared_workspace() {
+            Some(ws) => scan::spawn_remote(ws, known, ctx.clone()),
+            None => scan::spawn(backend.root(), known, ctx.clone()),
+        });
     }
 
     fn poll_scan(&mut self, ctx: &egui::Context) {
@@ -388,11 +433,22 @@ impl App {
                 self.entries = scan.entries;
                 self.folders = scan.folders;
                 self.images = scan.images;
+                self.remote = scan.remote;
+                self.offline = scan.offline;
+                if !scan.followed_moves.is_empty() {
+                    let moves: Vec<String> = scan.followed_moves.iter().map(|(a, b)| format!("{a} to {b}")).collect();
+                    self.info_msg(format!("Moved on the server: {}", moves.join(", ")));
+                }
                 self.rows_for = None;
                 if self.selected.as_ref().is_some_and(|s| self.entry(s).is_none() && self.image_file(s).is_none()) {
                     self.selected = None;
                 }
                 self.load_history();
+            }
+            Err(e) if e == scan::LOGIN_NEEDED => {
+                if !matches!(self.dialog, Some(Dialog::Login { .. })) {
+                    self.dialog = Some(Dialog::Login { password: String::new(), error: None });
+                }
             }
             Err(e) => self.error(e),
         }
@@ -402,12 +458,18 @@ impl App {
     }
 
     fn load_history(&mut self) {
-        self.history = match (&self.vault, &self.selected) {
-            (Some(vault), Some(path)) => vault.history(path).unwrap_or_default(),
+        let Some(path) = self.selected.clone() else {
+            self.history.clear();
+            self.lifecycle = None;
+            return;
+        };
+        let untracked = self.entry(&path).is_none_or(|e| e.latest.is_none());
+        self.history = match &self.backend {
+            Some(b) if !untracked => b.history(&path).unwrap_or_default(),
             _ => Vec::new(),
         };
-        self.lifecycle = match (&self.vault, &self.selected) {
-            (Some(vault), Some(path)) => vault.lifecycle(path).ok().zip(vault.suggested_revision(path).ok()),
+        self.lifecycle = match &self.backend {
+            Some(b) if !untracked => b.lifecycle(&path, self.entry(&path)),
             _ => None,
         };
     }
@@ -442,7 +504,7 @@ impl App {
     fn version_thumb(&mut self, version: &Version) -> Option<egui::Image<'static>> {
         let key = version.thumbnail.as_ref()?;
         if !self.thumbs.contains_key(key) {
-            let png = self.vault.as_ref().and_then(|v| v.thumbnail(version).ok().flatten()).map(Arc::from);
+            let png = self.backend.as_ref().and_then(|b| b.thumbnail(version)).map(Arc::from);
             self.thumbs.insert(key.clone(), png);
         }
         self.image(key)
@@ -546,15 +608,172 @@ impl App {
     fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::Select(path) => self.select(&path),
-            Action::Open(path) => self.open_design(&path),
+            Action::Open(path) => {
+                if self.remote.get(&path).is_some_and(|r| r.status == remote::RemoteStatus::NotDownloaded)
+                    && self.remote_op(ctx, |ws| ws.get(&path)).is_none()
+                {
+                    return;
+                }
+                self.open_design(&path);
+            }
+            Action::AskConnect => {
+                let (url, user) = self.settings.servers.first().cloned().unwrap_or_default();
+                self.dialog = Some(Dialog::Connect(ConnectForm {
+                    url: if url.is_empty() { "http://".into() } else { url },
+                    user,
+                    password: String::new(),
+                    client: None,
+                    vaults: Vec::new(),
+                    vault: String::new(),
+                    folder: String::new(),
+                    error: None,
+                }));
+            }
+            Action::ConnectServer => {
+                let Some(Dialog::Connect(form)) = &mut self.dialog else { return };
+                let mut client = remote::Client::new(form.url.trim(), None);
+                match client.login(form.user.trim(), &form.password).and_then(|_| client.vaults().map(|v| (client, v))) {
+                    Ok((client, vaults)) => {
+                        form.password.clear();
+                        form.error = if vaults.is_empty() { Some(format!("{} may use no vault on this server yet", form.user.trim())) } else { None };
+                        form.vault = vaults.first().map(|v| v.name.clone()).unwrap_or_default();
+                        form.folder = default_workspace(&form.vault);
+                        form.vaults = vaults;
+                        form.client = Some(client);
+                        let server = (form.url.trim().to_owned(), form.user.trim().to_owned());
+                        self.settings.servers.retain(|s| *s != server);
+                        self.settings.servers.insert(0, server);
+                    }
+                    Err(e) => form.error = Some(e.to_string()),
+                }
+            }
+            Action::JoinVault => {
+                let Some(Dialog::Connect(form)) = &mut self.dialog else { return };
+                let Some(client) = form.client.clone() else { return };
+                let folder = PathBuf::from(form.folder.trim());
+                let result = if remote::Workspace::is_workspace(&folder) {
+                    Ok(())
+                } else {
+                    remote::Workspace::create(&folder, client, form.user.trim(), &form.vault).map(drop)
+                };
+                match result {
+                    Ok(()) => {
+                        self.dialog = None;
+                        self.open_vault(ctx, folder);
+                    }
+                    Err(e) => form.error = Some(e.to_string()),
+                }
+            }
+            Action::Relogin(password) => {
+                let Some(ws) = self.backend.as_ref().and_then(Backend::shared_workspace) else { return };
+                let mut ws = ws.lock().unwrap_or_else(|e| e.into_inner());
+                let user = ws.user().to_owned();
+                let mut client = remote::Client::new(ws.client().url(), None);
+                let result = client.login(&user, &password).and_then(|_| ws.set_client(client, &user));
+                drop(ws);
+                match result {
+                    Ok(()) => {
+                        self.dialog = None;
+                        self.info_msg(format!("Logged in as {user}"));
+                        self.start_scan(ctx);
+                    }
+                    Err(e) => {
+                        if let Some(Dialog::Login { error, .. }) = &mut self.dialog {
+                            *error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Action::Get(path) => {
+                if self.remote_op(ctx, |ws| ws.get(&path)).is_some() {
+                    self.info_msg(format!("Got {path}"));
+                }
+            }
+            Action::GetAll => {
+                let paths: Vec<String> = self
+                    .remote
+                    .iter()
+                    .filter(|(_, r)| matches!(r.status, remote::RemoteStatus::NotDownloaded | remote::RemoteStatus::NewerOnServer))
+                    .map(|(p, _)| p.clone())
+                    .collect();
+                let mut failed = Vec::new();
+                let got = self
+                    .remote_op(ctx, |ws| {
+                        let mut got = 0;
+                        for p in &paths {
+                            match ws.get(p) {
+                                Ok(()) => got += 1,
+                                Err(e) if e.needs_login() => return Err(e),
+                                Err(e) => failed.push(format!("{p}: {e}")),
+                            }
+                        }
+                        Ok(got)
+                    })
+                    .unwrap_or(0);
+                if failed.is_empty() {
+                    self.info_msg(format!("Got {got} files"));
+                } else {
+                    self.error(format!("Got {got}; not: {}", failed.join("; ")));
+                }
+            }
+            Action::Checkout(path) => {
+                if self.remote_op(ctx, |ws| ws.checkout(&path)).is_some() {
+                    self.info_msg(format!("{path} is checked out to you"));
+                }
+            }
+            Action::UndoCheckout { path, discard } => {
+                if self.remote_op(ctx, |ws| ws.undo_checkout(&path, discard)).is_some() {
+                    self.info_msg(if discard { format!("{path}: check-out undone, changes discarded") } else { format!("{path} is no longer checked out") });
+                }
+            }
+            Action::RemoteCheckin { path, comment, keep } => {
+                if let Some(v) = self.remote_op(ctx, |ws| ws.checkin(&path, &comment, keep)) {
+                    self.comment.clear();
+                    self.info_msg(format!("Checked in {path} as v{}{}", v.number, if keep { " (still checked out)" } else { "" }));
+                }
+            }
+            Action::AddToServer { path, comment } => {
+                if let Some(v) = self.remote_op(ctx, |ws| ws.add(&path, &comment)) {
+                    self.comment.clear();
+                    self.info_msg(format!("Added {path} to the server as v{}", v.number));
+                }
+            }
+            Action::UploadImage(path) => {
+                if self.remote_op(ctx, |ws| ws.put_image(&path)).is_some() {
+                    self.info_msg(format!("Uploaded {path}"));
+                }
+            }
+            Action::KeepCopyAndGet(path) => {
+                let Some(backend) = &self.backend else { return };
+                let file = backend.absolute(&path);
+                let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let mut dialog = rfd::FileDialog::new().set_title("Keep a copy of your version").set_file_name(format!("my copy of {name}"));
+                if let Some(dir) = dirs_home() {
+                    dialog = dialog.set_directory(dir);
+                }
+                let Some(out) = dialog.save_file() else { return };
+                if let Err(e) = std::fs::copy(&file, &out).and_then(|_| {
+                    let mut perms = std::fs::metadata(&file)?.permissions();
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    perms.set_readonly(false);
+                    std::fs::set_permissions(&file, perms)?;
+                    std::fs::remove_file(&file)
+                }) {
+                    self.error(format!("Could not keep the copy: {e}"));
+                    return;
+                }
+                if self.remote_op(ctx, |ws| ws.get(&path)).is_some() {
+                    self.info_msg(format!("Your version is in {}; {path} is the latest from the server now", out.display()));
+                }
+            }
             Action::ShowInFolder(path) | Action::ShowFolder(path) => {
-                let Some(vault) = &self.vault else { return };
-                if let Err(e) = launcher::show_in_folder(&vault.absolute(&path)) {
+                let Some(backend) = &self.backend else { return };
+                if let Err(e) = launcher::show_in_folder(&backend.absolute(&path)) {
                     self.error(format!("Could not open the file manager: {e}"));
                 }
             }
             Action::CheckIn { path, comment } => {
-                let Some(vault) = &mut self.vault else { return };
+                let Some(vault) = self.backend.as_mut().and_then(Backend::local) else { return };
                 match vault.check_in(&path, &comment) {
                     Ok(v) => {
                         self.comment.clear();
@@ -566,7 +785,7 @@ impl App {
                 }
             }
             Action::CheckInAll { comment, untracked } => {
-                let Some(vault) = &mut self.vault else { return };
+                let Some(vault) = self.backend.as_mut().and_then(Backend::local) else { return };
                 let paths: Vec<String> = self
                     .entries
                     .iter()
@@ -600,8 +819,8 @@ impl App {
                 self.dialog = Some(Dialog::Compare { path, from, to, result: None });
             }
             Action::Restore { path, number } => {
-                let Some(vault) = &mut self.vault else { return };
-                match vault.restore(&path, number) {
+                let Some(backend) = &mut self.backend else { return };
+                match backend.restore(&path, number) {
                     Ok(v) => {
                         self.info_msg(format!("Restored v{number} of {path} (now v{})", v.number));
                         self.load_history();
@@ -611,8 +830,8 @@ impl App {
                 }
             }
             Action::SaveCopy { path, version } => {
-                let Some(vault) = &self.vault else { return };
-                let file = vault.absolute(&path);
+                let Some(backend) = &self.backend else { return };
+                let file = backend.absolute(&path);
                 let stem = file.file_stem().map_or("design".into(), |s| s.to_string_lossy().into_owned());
                 let ext = file.extension().map_or("solidcraft".into(), |s| s.to_string_lossy().into_owned());
                 let mut dialog = rfd::FileDialog::new().set_file_name(format!("{stem}-v{}.{ext}", version.number));
@@ -620,7 +839,7 @@ impl App {
                     dialog = dialog.set_directory(dir);
                 }
                 let Some(out) = dialog.save_file() else { return };
-                match vault.version_bytes(&version).map_err(|e| e.to_string()).and_then(|b| {
+                match backend.version_bytes(&version).map_err(|e| e.to_string()).and_then(|b| {
                     std::fs::write(&out, b).map_err(|e| e.to_string())
                 }) {
                     Ok(()) => {
@@ -631,9 +850,9 @@ impl App {
                 }
             }
             Action::Rename { from, to } => {
-                let Some(vault) = &mut self.vault else { return };
+                let Some(backend) = &mut self.backend else { return };
                 let to = typed_path(&to);
-                match vault.rename(&from, &to) {
+                match backend.rename(&from, &to) {
                     Ok(report) => {
                         self.report_move(&from, &to, &report);
                         self.selected = Some(to);
@@ -644,7 +863,7 @@ impl App {
                 }
             }
             Action::Relink { missing, to } => {
-                let Some(vault) = &mut self.vault else { return };
+                let Some(vault) = self.backend.as_mut().and_then(Backend::local) else { return };
                 match vault.relink(&missing, &to) {
                     Ok(()) => {
                         self.info_msg(format!("{to} now has the history of {missing}"));
@@ -676,8 +895,8 @@ impl App {
             }
             Action::AskNewFolder(parent) => self.dialog = Some(Dialog::NewFolder { parent, name: String::new() }),
             Action::CreateFolder(folder) => {
-                let Some(vault) = &self.vault else { return };
-                match vault.create_folder(&folder) {
+                let Some(backend) = &mut self.backend else { return };
+                match backend.create_folder(&folder) {
                     Ok(()) => {
                         self.info_msg(format!("Created folder {folder}"));
                         self.folders.push(folder.clone());
@@ -689,8 +908,8 @@ impl App {
                 }
             }
             Action::DeleteFolder(folder) => {
-                let Some(vault) = &self.vault else { return };
-                match vault.remove_folder(&folder) {
+                let Some(backend) = &mut self.backend else { return };
+                match backend.remove_folder(&folder) {
                     Ok(()) => {
                         self.info_msg(format!("Deleted folder {folder}"));
                         self.folders.retain(|f| *f != folder);
@@ -703,18 +922,18 @@ impl App {
                 }
             }
             Action::OpenFile(path) => {
-                let Some(vault) = &self.vault else { return };
-                if let Err(e) = launcher::open_with_system(&vault.absolute(&path)) {
+                let Some(backend) = &self.backend else { return };
+                if let Err(e) = launcher::open_with_system(&backend.absolute(&path)) {
                     self.error(format!("Could not open {path}: {e}"));
                 }
             }
             Action::AskRelease(path) => {
-                let revision = self.vault.as_ref().and_then(|v| v.suggested_revision(&path).ok()).unwrap_or_default();
+                let revision = self.lifecycle.as_ref().map(|(_, suggested)| suggested.clone()).unwrap_or_default();
                 self.dialog = Some(Dialog::Release { path, revision, note: String::new() });
             }
             Action::Release { path, revision, note } => {
-                let Some(vault) = &mut self.vault else { return };
-                match vault.release_as(&path, &revision, &note) {
+                let Some(backend) = &mut self.backend else { return };
+                match backend.release_as(&path, &revision, &note) {
                     Ok(r) => {
                         self.info_msg(format!("Released {path} as revision {} (v{})", r.revision, r.version));
                         self.load_history();
@@ -724,8 +943,8 @@ impl App {
                 }
             }
             Action::Revise(path) => {
-                let Some(vault) = &mut self.vault else { return };
-                match vault.revise(&path) {
+                let Some(backend) = &mut self.backend else { return };
+                match backend.revise(&path) {
                     Ok(()) => {
                         self.info_msg(format!("{path} is work in progress again"));
                         self.load_history();
@@ -735,8 +954,8 @@ impl App {
                 }
             }
             Action::SetObsolete { path, obsolete } => {
-                let Some(vault) = &mut self.vault else { return };
-                match vault.set_obsolete(&path, obsolete) {
+                let Some(backend) = &mut self.backend else { return };
+                match backend.set_obsolete(&path, obsolete) {
                     Ok(()) => {
                         self.info_msg(if obsolete { format!("{path} is obsolete") } else { format!("{path} is work in progress again") });
                         self.load_history();
@@ -746,8 +965,8 @@ impl App {
                 }
             }
             Action::AskEditProperties(path) => {
-                let Some(vault) = &self.vault else { return };
-                match scformat::read_file(vault.absolute(&path)) {
+                let Some(backend) = &self.backend else { return };
+                match scformat::read_file(backend.absolute(&path)) {
                     Ok(info) => {
                         let m = &info.metadata;
                         let values = [&m.part_number, &m.revision, &m.project, &m.description, &m.author, &m.organization, &m.license]
@@ -759,19 +978,10 @@ impl App {
                 }
             }
             Action::SaveProperties { path, name, values, check_in, comment } => {
-                let Some(vault) = &mut self.vault else { return };
+                let Some(backend) = &mut self.backend else { return };
                 let properties: Vec<(&str, Option<&str>)> =
                     EDITABLE.iter().zip(&values).map(|((key, _), v)| (*key, Some(v.as_str()))).collect();
-                let result = vault.edit_properties(&path, Some(&name), &properties).and_then(|()| {
-                    if !check_in {
-                        return Ok(None);
-                    }
-                    match vault.check_in(&path, &comment) {
-                        Ok(v) => Ok(Some(v.number)),
-                        Err(vault::Error::Unchanged(_)) => Ok(None),
-                        Err(e) => Err(e),
-                    }
-                });
+                let result = backend.save_properties(&path, &name, &properties, check_in.then_some(comment.as_str()));
                 match result {
                     Ok(Some(n)) => self.info_msg(format!("Saved the properties of {path} (v{n})")),
                     Ok(None) => self.info_msg(format!("Saved the properties of {path}")),
@@ -798,7 +1008,7 @@ impl App {
                 let _ = add;
             }
             Action::SetScheme(scheme) => {
-                let Some(vault) = &mut self.vault else { return };
+                let Some(vault) = self.backend.as_mut().and_then(Backend::local) else { return };
                 if let Err(e) = vault.set_revision_scheme(scheme) {
                     self.error(e);
                 }
@@ -829,11 +1039,11 @@ impl App {
                 });
             }
             Action::CreateDesign { path, part_number, description, open } => {
-                let Some(vault) = &mut self.vault else { return };
+                let Some(backend) = &mut self.backend else { return };
                 let (folder, file) = path.rsplit_once('/').unwrap_or(("", &path));
                 let name = file.strip_suffix(".solidcraft").unwrap_or(file);
                 let bytes = scformat::new_design(name, &[("part_number", &part_number), ("description", &description)]);
-                match vault.add_new(&path, &bytes, "New design") {
+                match backend.add_new(&path, &bytes, "New design") {
                     Ok(_) => {
                         self.info_msg(format!("Created {path} (v1)"));
                         self.view = if folder.is_empty() { View::TopLevel } else { View::Folder(folder.to_owned()) };
@@ -848,8 +1058,8 @@ impl App {
                 }
             }
             Action::MoveToFolder { path, folder } => {
-                let Some(vault) = &mut self.vault else { return };
-                match vault.move_to_folder(&path, &folder) {
+                let Some(backend) = &mut self.backend else { return };
+                match backend.move_to_folder(&path, &folder) {
                     Ok(report) if report.to == path => {}
                     Ok(report) => {
                         let place = if folder.is_empty() { "the top level".to_owned() } else { folder };
@@ -863,6 +1073,118 @@ impl App {
                     Err(e) => self.error(e),
                 }
             }
+        }
+    }
+
+    /// Runs a workspace operation (it talks to the server); on success the history and the list
+    /// are refreshed, an expired login asks for the password, other errors go to the status line.
+    fn remote_op<T>(&mut self, ctx: &egui::Context, op: impl FnOnce(&mut remote::Workspace) -> remote::Result<T>) -> Option<T> {
+        let ws = self.backend.as_ref()?.shared_workspace()?;
+        let result = {
+            let mut ws = ws.lock().unwrap_or_else(|e| e.into_inner());
+            op(&mut ws)
+        };
+        match result {
+            Ok(value) => {
+                self.load_history();
+                self.start_scan(ctx);
+                Some(value)
+            }
+            Err(e) if e.needs_login() => {
+                self.dialog = Some(Dialog::Login { password: String::new(), error: None });
+                None
+            }
+            Err(e) => {
+                self.error(e);
+                None
+            }
+        }
+    }
+
+    /// What can be done with a workspace design: get, check out, check in, add.
+    fn remote_panel(&mut self, ui: &mut egui::Ui, entry: &Entry, r: &RemoteInfo, actions: &mut Vec<Action>) {
+        use remote::RemoteStatus as R;
+        let path = entry.path.clone();
+        let me = self.backend.as_ref().and_then(|b| b.workspace().map(|w| w.user().to_owned())).unwrap_or_default();
+        ui.add_space(10.0);
+        ui.label(RichText::new("On the server").strong());
+        if let Some(lock) = &r.lock {
+            let who = if lock.user == me { "you".to_owned() } else { lock.user.clone() };
+            ui.label(format!("Checked out by {who} since {}", unix_time(lock.since)));
+        }
+        if let (Some(server), Some(base)) = (r.server_version, r.base_version) {
+            if server != base {
+                ui.label(format!("v{server} on the server; you have v{base}"));
+            }
+        }
+        let comment_box = |ui: &mut egui::Ui, comment: &mut String| {
+            ui.add(egui::TextEdit::multiline(comment).hint_text("What changed?").desired_rows(2).desired_width(f32::INFINITY));
+        };
+        ui.horizontal_wrapped(|ui| match &r.status {
+            R::NotDownloaded => {
+                if ui.button("Get").on_hover_text("Fetch it into the workspace").clicked() {
+                    actions.push(Action::Get(path.clone()));
+                }
+            }
+            R::NewerOnServer => {
+                if ui.button("Get latest").clicked() {
+                    actions.push(Action::Get(path.clone()));
+                }
+                if ui.button("Check out").on_hover_text("Fetches the latest version and locks it for you").clicked() {
+                    actions.push(Action::Checkout(path.clone()));
+                }
+            }
+            R::UpToDate => {
+                if ui.button("Check out").on_hover_text("Lock it for you, to change it").clicked() {
+                    actions.push(Action::Checkout(path.clone()));
+                }
+            }
+            R::CheckedOutByOther(user) => {
+                ui.weak(format!("{user} is working on it; you can open it read-only."));
+            }
+            R::ChangedWithoutCheckout => {
+                ui.colored_label(ui.visuals().warn_fg_color, "You changed this without checking it out.");
+                if ui.button("Check out now").clicked() {
+                    actions.push(Action::Checkout(path.clone()));
+                }
+            }
+            R::Conflict => {
+                ui.colored_label(ui.visuals().error_fg_color, "Changed here and on the server.");
+                if ui.button("Keep my copy, get the latest…").on_hover_text("Saves your version elsewhere first").clicked() {
+                    actions.push(Action::KeepCopyAndGet(path.clone()));
+                }
+            }
+            R::RemovedOnServer => {
+                ui.weak("No longer on the server (deleted or moved by someone).");
+            }
+            R::CheckedOut { .. } | R::LocalOnly => {}
+        });
+        match &r.status {
+            R::CheckedOut { modified } => {
+                comment_box(ui, &mut self.comment);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add_enabled(*modified, egui::Button::new("⬆ Check in")).on_disabled_hover_text("Nothing changed yet").clicked() {
+                        actions.push(Action::RemoteCheckin { path: path.clone(), comment: self.comment.clone(), keep: false });
+                    }
+                    if ui.add_enabled(*modified, egui::Button::new("Check in, keep checked out")).clicked() {
+                        actions.push(Action::RemoteCheckin { path: path.clone(), comment: self.comment.clone(), keep: true });
+                    }
+                    if ui.button("Undo check-out").on_hover_text("Keeps your changes here").clicked() {
+                        actions.push(Action::UndoCheckout { path: path.clone(), discard: false });
+                    }
+                    if *modified && ui.button("Undo and discard changes").clicked() {
+                        actions.push(Action::UndoCheckout { path: path.clone(), discard: true });
+                    }
+                });
+            }
+            R::LocalOnly => {
+                ui.label("Not on the server yet.");
+                comment_box(ui, &mut self.comment);
+                if ui.button("⬆ Add to the server").clicked() {
+                    actions.push(Action::AddToServer { path: path.clone(), comment: self.comment.clone() });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -903,8 +1225,8 @@ impl App {
     }
 
     fn open_design(&mut self, path: &str) {
-        let Some(vault) = &self.vault else { return };
-        let file = vault.absolute(path);
+        let Some(backend) = &self.backend else { return };
+        let file = backend.absolute(path);
         let Some(launcher) = self.launcher() else {
             self.error("SolidCraft was not found. Choose its AppImage in Settings.");
             self.dialog = Some(Dialog::Settings { open_command: self.settings.open_command.clone() });
@@ -918,14 +1240,14 @@ impl App {
     /// Opens an earlier version in SolidCraft as a copy in a read-only folder, so that
     /// SolidCraft cannot save over it; the working file and the vault stay as they are.
     fn open_version_copy(&mut self, path: &str, version: &Version) {
-        let Some(vault) = &self.vault else { return };
+        let Some(backend) = &self.backend else { return };
         let file = path.rsplit_once('/').map_or(path, |(_, f)| f);
         let (stem, ext) = file.rsplit_once('.').unwrap_or((file, "solidcraft"));
         let dir = std::env::temp_dir().join("solidcraft-pdm").join(&version.hash[..16]);
         let copy = dir.join(format!("{stem} (v{}, read-only).{ext}", version.number));
         let result = (|| -> Result<(), String> {
             if !copy.is_file() {
-                let bytes = vault.version_bytes(version).map_err(|e| e.to_string())?;
+                let bytes = backend.version_bytes(version).map_err(|e| e.to_string())?;
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 std::fs::write(&copy, bytes).map_err(|e| e.to_string())?;
                 for p in [&copy, &dir] {
@@ -956,6 +1278,9 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Vault", |ui| {
+                if ui.button("Connect to a server…").clicked() {
+                    actions.push(Action::AskConnect);
+                }
                 if ui.button("Open vault…").clicked() {
                     actions.push(Action::PickVault);
                 }
@@ -991,7 +1316,7 @@ impl App {
                 ui.label(RichText::new(format!("Interface size: {:.0} %", ui.ctx().zoom_factor() * 100.0)).small().weak());
                 egui::gui_zoom::zoom_menu_buttons(ui);
             });
-            if self.vault.is_none() {
+            if self.backend.is_none() {
                 return;
             }
             ui.separator();
@@ -1005,13 +1330,28 @@ impl App {
             if ui.button("⟳ Refresh").on_hover_text("Rescan the vault (F5)").clicked() {
                 actions.push(Action::Refresh);
             }
-            let changes = self.count(Status::Modified) + self.count(Status::Untracked);
-            if ui
-                .add_enabled(changes > 0, egui::Button::new("⬆ Check in all…"))
-                .on_hover_text("Record every modified (and optionally untracked) design as a new version")
-                .clicked()
-            {
-                self.dialog = Some(Dialog::CheckInAll { comment: String::new(), untracked: true });
+            if self.backend.as_ref().is_some_and(Backend::is_remote) {
+                let newer = self
+                    .remote
+                    .values()
+                    .filter(|r| matches!(r.status, remote::RemoteStatus::NotDownloaded | remote::RemoteStatus::NewerOnServer))
+                    .count();
+                if ui
+                    .add_enabled(newer > 0, egui::Button::new(format!("⬇ Get all new and newer ({newer})")))
+                    .on_hover_text("Fetch what is new or newer on the server (never over your changes)")
+                    .clicked()
+                {
+                    actions.push(Action::GetAll);
+                }
+            } else {
+                let changes = self.count(Status::Modified) + self.count(Status::Untracked);
+                if ui
+                    .add_enabled(changes > 0, egui::Button::new("⬆ Check in all…"))
+                    .on_hover_text("Record every modified (and optionally untracked) design as a new version")
+                    .clicked()
+                {
+                    self.dialog = Some(Dialog::CheckInAll { comment: String::new(), untracked: true });
+                }
             }
             if self.scan.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.spinner());
@@ -1021,8 +1361,16 @@ impl App {
 
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if let Some(vault) = &self.vault {
-                ui.weak(vault.root().display().to_string());
+            if let Some(backend) = &self.backend {
+                if let Some(ws) = backend.workspace() {
+                    let (text, color) = match &self.offline {
+                        Some(why) => (format!("Offline: {why}"), ui.visuals().warn_fg_color),
+                        None => (format!("{} on {} as {}", ws.vault(), ws.client().url(), ws.user()), ui.visuals().weak_text_color()),
+                    };
+                    ui.colored_label(color, text);
+                    ui.separator();
+                }
+                ui.weak(backend.root().display().to_string());
                 ui.separator();
                 ui.label(format!(
                     "{} designs · {} modified · {} untracked · {} missing",
@@ -1254,7 +1602,8 @@ impl App {
             ListColumn::ALL.into_iter().filter(|c| !self.settings.hidden_columns.contains(c)).collect();
         // Without room for every column, the date moves into the design's second line.
         let spacing = ui.spacing().item_spacing.x;
-        let needed = thumb.x + 8.0 + 160.0 + columns.iter().map(|c| c.width() + spacing).sum::<f32>() + spacing;
+        let remote = !self.remote.is_empty();
+        let needed = thumb.x + 8.0 + 160.0 + columns.iter().map(|c| c.width(remote) + spacing).sum::<f32>() + spacing;
         if needed > ui.available_width() {
             columns.retain(|c| *c != ListColumn::Modified);
         }
@@ -1263,7 +1612,7 @@ impl App {
         let folders = &self.folders;
         let mut table = TableBuilder::new(ui)
             // Widths are kept per column position: another column set gets its own.
-            .id_salt(("list", &columns))
+            .id_salt(("list", &columns, remote))
             .striped(true)
             .resizable(true)
             .sense(egui::Sense::click_and_drag())
@@ -1271,7 +1620,7 @@ impl App {
             .column(Column::exact(thumb.x + 8.0))
             .column(Column::remainder().at_least(160.0).clip(true));
         for c in &columns {
-            table = table.column(Column::initial(c.width()).at_least(c.width().min(60.0)).clip(true));
+            table = table.column(Column::initial(c.width(remote)).at_least(c.width(remote).min(60.0)).clip(true));
         }
         table
             .header(text_height + 8.0, |mut h| {
@@ -1311,10 +1660,16 @@ impl App {
                             let cells = columns
                                 .iter()
                                 .map(|c| match c {
-                                    ListColumn::Status => {
-                                        let (label, color) = status_style(e.status);
-                                        RichText::new(label).color(color)
-                                    }
+                                    ListColumn::Status => match self.remote.get(&e.path) {
+                                        Some(r) => {
+                                            let (label, color) = remote_style(&r.status);
+                                            RichText::new(label).color(color)
+                                        }
+                                        None => {
+                                            let (label, color) = status_style(e.status);
+                                            RichText::new(label).color(color)
+                                        }
+                                    },
                                     ListColumn::State => state_text(e),
                                     ListColumn::Version => latest.map_or("-".into(), |v| format!("v{}", v.number)).into(),
                                     ListColumn::PartNumber => props
@@ -1393,6 +1748,9 @@ impl App {
                                 actions.push(if is_image { Action::OpenFile(path.to_owned()) } else { Action::Open(path.to_owned()) });
                                 ui.close();
                             }
+                            if is_image {
+                                image_server_buttons(ui, self.remote.get(path).map(|r| &r.status), path, actions);
+                            }
                             if ui.button("Show in folder").clicked() {
                                 actions.push(Action::ShowInFolder(path.to_owned()));
                                 ui.close();
@@ -1435,6 +1793,12 @@ impl App {
         let latest = entry.latest.clone();
         let image = self.entry_thumb(&entry);
         let file = entry.path.rsplit_once('/').map_or(entry.path.as_str(), |(_, f)| f).to_owned();
+        // On a server: who has it checked out ("you" for this user), which the server's rules
+        // depend on.
+        let me = self.backend.as_ref().and_then(|b| b.workspace().map(|w| w.user().to_owned()));
+        let lock = self.remote.get(&entry.path).and_then(|r| r.lock.as_ref());
+        let held = lock.map(|l| if Some(&l.user) == me.as_ref() { "you".to_owned() } else { l.user.clone() });
+        let by_other = held.as_deref().filter(|h| *h != "you").map(|h| format!("Checked out by {h}"));
 
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.add_space(6.0);
@@ -1447,14 +1811,20 @@ impl App {
             ui.heading(&file);
             ui.weak(&entry.path);
             ui.horizontal(|ui| {
-                let (label, color) = status_style(entry.status);
+                let (label, color) = match self.remote.get(&entry.path) {
+                    Some(r) => remote_style(&r.status),
+                    None => {
+                        let (l, c) = status_style(entry.status);
+                        (l.to_owned(), c)
+                    }
+                };
                 ui.label(RichText::new(label).color(color).strong());
                 if let Some(v) = &latest {
                     ui.label(format!("· v{} of {}", v.number, self.history.len()));
                 }
             });
             if let Some((lifecycle, next)) = self.lifecycle.clone() {
-                lifecycle_ui(ui, &entry, &lifecycle, &next, actions);
+                lifecycle_ui(ui, &entry, &lifecycle, &next, held.as_deref(), actions);
             }
 
             if let Some(from) = &entry.moved_from {
@@ -1476,20 +1846,29 @@ impl App {
                 if ui.add_enabled(present, egui::Button::new("Show in folder")).clicked() {
                     actions.push(Action::ShowInFolder(entry.path.clone()));
                 }
-                if ui.add_enabled(present, egui::Button::new("Move / rename…")).clicked() {
+                let movable = ui.add_enabled(present && by_other.is_none(), egui::Button::new("Move / rename…"));
+                if movable.on_disabled_hover_text(by_other.as_deref().unwrap_or_default()).clicked() {
                     self.dialog = Some(Dialog::Rename { from: entry.path.clone(), to: entry.path.clone() });
                 }
+                // The server writes the properties as a new version: not while anyone has it.
                 let readable = info.is_some();
+                let why = match held.as_deref() {
+                    Some("you") => "Check it in first".to_owned(),
+                    Some(user) => format!("Checked out by {user}"),
+                    None => "Not a readable SolidCraft design".to_owned(),
+                };
                 if ui
-                    .add_enabled(present && readable, egui::Button::new("Edit properties…"))
-                    .on_disabled_hover_text("Not a readable SolidCraft design")
+                    .add_enabled(present && readable && held.is_none(), egui::Button::new("Edit properties…"))
+                    .on_disabled_hover_text(why)
                     .clicked()
                 {
                     actions.push(Action::AskEditProperties(entry.path.clone()));
                 }
             });
 
-            if matches!(entry.status, Status::Modified | Status::Untracked) {
+            if let Some(r) = self.remote.get(&entry.path).cloned() {
+                self.remote_panel(ui, &entry, &r, actions);
+            } else if matches!(entry.status, Status::Modified | Status::Untracked) {
                 ui.add_space(10.0);
                 ui.label(RichText::new(if entry.status == Status::Untracked { "Add to vault" } else { "Check in" }).strong());
                 ui.add(
@@ -1585,6 +1964,7 @@ impl App {
             ui.label(RichText::new("Reference image (shown, not versioned)").weak());
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
+                image_server_buttons(ui, self.remote.get(&path).map(|r| &r.status), &path, actions);
                 if ui.button("Open").clicked() {
                     actions.push(Action::OpenFile(path.clone()));
                 }
@@ -1928,6 +2308,93 @@ impl App {
                         close |= ui.button("Cancel").clicked();
                     });
                 }
+                Dialog::Login { password, error } => {
+                    ui.heading("Log in again");
+                    let who = self.backend.as_ref().and_then(|b| b.workspace().map(|w| format!("{} on {}", w.user(), w.client().url()))).unwrap_or_default();
+                    ui.label(format!("The login of {who} has expired."));
+                    let edit = ui.add(egui::TextEdit::singleline(password).password(true).hint_text("Password").desired_width(f32::INFINITY));
+                    if ui.memory(|m| m.focused().is_none()) {
+                        edit.request_focus();
+                    }
+                    if let Some(e) = error {
+                        ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Log in").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            actions.push(Action::Relogin(std::mem::take(password)));
+                        }
+                        close |= ui.button("Cancel").clicked();
+                    });
+                }
+                Dialog::Connect(form) => {
+                    ui.set_min_width(420.0);
+                    ui.heading("Connect to a server");
+                    ui.add_space(4.0);
+                    egui::Grid::new("connect").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        let logged_in = form.client.is_some();
+                        ui.label("Server");
+                        ui.add_enabled(!logged_in, egui::TextEdit::singleline(&mut form.url).hint_text("http://server:7380").desired_width(280.0));
+                        ui.end_row();
+                        ui.label("User");
+                        ui.add_enabled(!logged_in, egui::TextEdit::singleline(&mut form.user).desired_width(280.0));
+                        ui.end_row();
+                        if !logged_in {
+                            ui.label("Password");
+                            ui.add(egui::TextEdit::singleline(&mut form.password).password(true).desired_width(280.0));
+                            ui.end_row();
+                        }
+                    });
+                    let plain = form.url.trim().starts_with("http://") && !form.url.contains("localhost") && !form.url.contains("127.0.0.1");
+                    if plain && form.client.is_none() {
+                        ui.label(RichText::new("Over http:// the password travels unencrypted: fine on your own network or a VPN.").small().color(ui.visuals().warn_fg_color));
+                    }
+                    if form.client.is_none() {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let ok = !form.url.trim().is_empty() && !form.user.trim().is_empty() && !form.password.is_empty();
+                            if ui.add_enabled(ok, egui::Button::new("Connect")).clicked() || (ok && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                                actions.push(Action::ConnectServer);
+                            }
+                            close |= ui.button("Cancel").clicked();
+                        });
+                    } else {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Vault").strong());
+                        let mut changed = false;
+                        for v in &form.vaults {
+                            let label = format!("{}  ({})", v.name, crate::app::access_label(v.access));
+                            if ui.radio(form.vault == v.name, label).clicked() && form.vault != v.name {
+                                form.vault = v.name.clone();
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            form.folder = default_workspace(&form.vault);
+                        }
+                        ui.add_space(6.0);
+                        ui.label("Workspace folder (your copy: SolidCraft opens and saves the designs here)");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut form.folder).desired_width(ui.available_width() - 90.0));
+                            if ui.button("Browse…").clicked() {
+                                if let Some(dir) = rfd::FileDialog::new().set_title("Workspace folder").pick_folder() {
+                                    form.folder = dir.join(&form.vault).display().to_string();
+                                }
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let ok = !form.vault.is_empty() && !form.folder.trim().is_empty();
+                            if ui.add_enabled(ok, egui::Button::new("Open the vault")).clicked() {
+                                actions.push(Action::JoinVault);
+                            }
+                            close |= ui.button("Cancel").clicked();
+                        });
+                    }
+                    if let Some(e) = &form.error {
+                        ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                    }
+                }
                 Dialog::Compare { path, from, to, result } => {
                     ui.set_min_width(680.0);
                     ui.heading(format!("Compare {}", path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f)));
@@ -1950,7 +2417,7 @@ impl App {
                         *result = None;
                     }
                     if result.is_none() {
-                        *result = Some(self.vault.as_ref().map_or(Err("no vault".into()), |v| {
+                        *result = Some(self.backend.as_ref().map_or(Err("no vault".into()), |v| {
                             compare_sides(v, path, &self.history, *from, *to)
                         }));
                     }
@@ -1995,7 +2462,7 @@ impl App {
                     let file = format!("{stem}.solidcraft");
                     let path = if folder.is_empty() { file.clone() } else { format!("{folder}/{file}") };
                     let valid = !stem.is_empty() && !stem.contains('/') && !stem.starts_with('.');
-                    let exists = valid && self.vault.as_ref().is_some_and(|v| v.absolute(&path).exists());
+                    let exists = valid && self.backend.as_ref().is_some_and(|v| v.absolute(&path).exists());
                     if exists {
                         ui.colored_label(ui.visuals().warn_fg_color, format!("{file} exists already in this folder."));
                     } else if valid {
@@ -2052,7 +2519,7 @@ impl App {
                             .weak(),
                     );
                     ui.add_space(10.0);
-                    if let Some(vault) = &self.vault {
+                    if let Some(Backend::Local(vault)) = &self.backend {
                         ui.label(RichText::new("Revisions in this vault").strong());
                         let current = vault.revision_scheme().unwrap_or(vault::RevisionScheme::Letters);
                         ui.horizontal(|ui| {
@@ -2103,7 +2570,7 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_scan(ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        if self.vault.is_some() && focused && (!self.focused || self.last_scan.elapsed() >= RESCAN_EVERY) {
+        if self.backend.is_some() && focused && (!self.focused || self.last_scan.elapsed() >= RESCAN_EVERY) {
             self.start_scan(ctx);
         }
         self.focused = focused;
@@ -2125,7 +2592,7 @@ impl eframe::App for App {
         let mut actions = Vec::new();
         egui::Panel::top("top").show(ui, |ui| self.top_bar(ui, &mut actions));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        if self.vault.is_some() {
+        if self.backend.is_some() {
             egui::Panel::left("folders")
                 .default_size(220.0)
                 .min_size(150.0)
@@ -2285,10 +2752,16 @@ fn state_text(e: &Entry) -> RichText {
     }
 }
 
-/// The selected design's lifecycle and what can be done with it.
-fn lifecycle_ui(ui: &mut egui::Ui, entry: &Entry, lifecycle: &vault::Lifecycle, next: &str, actions: &mut Vec<Action>) {
+/// The selected design's lifecycle and what can be done with it. `held`: on a server, who has
+/// it checked out ("you", or a name); the server releases only a design nobody has.
+fn lifecycle_ui(ui: &mut egui::Ui, entry: &Entry, lifecycle: &vault::Lifecycle, next: &str, held: Option<&str>, actions: &mut Vec<Action>) {
     let path = entry.path.clone();
-    let current = entry.status == Status::Current;
+    let current = entry.status == Status::Current && held.is_none();
+    let busy = match held {
+        Some("you") => "Check it in first".to_owned(),
+        Some(user) => format!("Checked out by {user}"),
+        None => "Check in the changes first".to_owned(),
+    };
     ui.horizontal_wrapped(|ui| {
         match lifecycle.state {
             vault::State::Wip => {
@@ -2298,7 +2771,7 @@ fn lifecycle_ui(ui: &mut egui::Ui, entry: &Entry, lifecycle: &vault::Lifecycle, 
                 }
                 if ui
                     .add_enabled(current, egui::Button::new(format!("Release as {next}…")).small())
-                    .on_disabled_hover_text("Check in the changes first")
+                    .on_disabled_hover_text(&busy)
                     .clicked()
                 {
                     actions.push(Action::AskRelease(path.clone()));
@@ -2335,13 +2808,13 @@ fn lifecycle_ui(ui: &mut egui::Ui, entry: &Entry, lifecycle: &vault::Lifecycle, 
 }
 
 /// The two sides' files, compared.
-fn compare_sides(vault: &Vault, path: &str, history: &[Version], from: Side, to: Side) -> Result<Comparison, String> {
+fn compare_sides(backend: &Backend, path: &str, history: &[Version], from: Side, to: Side) -> Result<Comparison, String> {
     let bytes = |side: Side| -> Result<Vec<u8>, String> {
         match side {
-            Side::Working => std::fs::read(vault.absolute(path)).map_err(|e| format!("working file: {e}")),
+            Side::Working => std::fs::read(backend.absolute(path)).map_err(|e| format!("working file: {e}")),
             Side::Version(n) => {
                 let v = history.iter().find(|v| v.number == n).ok_or(format!("no v{n}"))?;
-                vault.version_bytes(v).map_err(|e| e.to_string())
+                backend.version_bytes(v).map_err(|e| e.to_string())
             }
         }
     };
@@ -2464,6 +2937,64 @@ fn column_toggles(ui: &mut egui::Ui, hidden: &[ListColumn], actions: &mut Vec<Ac
             actions.push(Action::ToggleColumn(column));
         }
     }
+}
+
+/// In a workspace: get a reference image from the server, or upload it.
+fn image_server_buttons(ui: &mut egui::Ui, status: Option<&remote::RemoteStatus>, path: &str, actions: &mut Vec<Action>) {
+    use remote::RemoteStatus as R;
+    match status {
+        Some(R::NotDownloaded) | Some(R::NewerOnServer) => {
+            if ui.button("Get from the server").clicked() {
+                actions.push(Action::Get(path.to_owned()));
+                ui.close();
+            }
+        }
+        _ => {}
+    }
+    match status {
+        Some(R::LocalOnly) | Some(R::NewerOnServer) => {
+            let label = if status == Some(&R::LocalOnly) { "Upload to the server" } else { "Upload this version" };
+            if ui.button(label).clicked() {
+                actions.push(Action::UploadImage(path.to_owned()));
+                ui.close();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The Status column for a workspace design.
+fn remote_style(status: &remote::RemoteStatus) -> (String, Color32) {
+    use remote::RemoteStatus as R;
+    match status {
+        R::UpToDate => ("Up to date".into(), Color32::from_rgb(80, 170, 100)),
+        R::NewerOnServer => ("Newer on server".into(), Color32::from_rgb(120, 145, 185)),
+        R::NotDownloaded => ("On the server".into(), Color32::from_rgb(120, 145, 185)),
+        R::CheckedOut { modified: false } => ("Checked out".into(), Color32::from_rgb(90, 160, 220)),
+        R::CheckedOut { modified: true } => ("Checked out · changed".into(), Color32::from_rgb(225, 145, 40)),
+        R::CheckedOutByOther(user) => (format!("Checked out by {user}"), Color32::from_rgb(170, 130, 200)),
+        R::ChangedWithoutCheckout => ("Changed, not checked out".into(), Color32::from_rgb(225, 145, 40)),
+        R::Conflict => ("Conflict".into(), Color32::from_rgb(215, 75, 75)),
+        R::LocalOnly => ("Not on the server".into(), Color32::from_rgb(120, 145, 185)),
+        R::RemovedOnServer => ("Removed on the server".into(), Color32::from_rgb(215, 75, 75)),
+    }
+}
+
+pub(crate) fn access_label(access: protocol::Access) -> &'static str {
+    match access {
+        protocol::Access::Read => "read only",
+        protocol::Access::Write => "read and change",
+        protocol::Access::Admin => "administrator",
+    }
+}
+
+/// `~/PDM/<vault>`, where a new workspace goes by default.
+fn default_workspace(vault: &str) -> String {
+    dirs_home().map(|h| h.join("PDM").join(vault).display().to_string()).unwrap_or_default()
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
 }
 
 fn status_style(status: Status) -> (&'static str, Color32) {
