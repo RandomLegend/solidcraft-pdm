@@ -62,7 +62,9 @@ chmod +x SolidCraft-PDM-*-x86_64.AppImage
 
 Point it at the folder with your designs; it offers to make it a vault (a hidden `.pdm` folder,
 your files are not changed). *Vault > Settings > Add SolidCraft PDM to the application menu* puts
-it into your launcher, with its icon.
+it into your launcher, with its icon. The AppImage looks for a new release once a day and,
+when you agree, replaces itself with it (checked against the release's `SHA256SUMS`) and
+restarts; see the [guide](docs/guide.md#updates).
 
 Windows 10 / 11: prepared, built by hand in CI; see [docs/windows.md](docs/windows.md).
 

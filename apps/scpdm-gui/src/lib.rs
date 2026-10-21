@@ -7,3 +7,4 @@ mod launcher;
 mod menu_entry;
 mod scan;
 mod search;
+mod update;

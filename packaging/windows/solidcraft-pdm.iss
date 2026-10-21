@@ -14,6 +14,8 @@ AppName=SolidCraft PDM
 AppVersion={#AppVersion}
 AppVerName=SolidCraft PDM {#AppVersion}
 DefaultDirName={localappdata}\Programs\SolidCraft PDM
+; An update closes the running app first (it quits by itself, this is for other copies).
+CloseApplications=yes
 DefaultGroupName=SolidCraft PDM
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -41,4 +43,6 @@ Name: "{group}\SolidCraft PDM"; Filename: "{app}\solidcraft-pdm.exe"
 Name: "{userdesktop}\SolidCraft PDM"; Filename: "{app}\solidcraft-pdm.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\solidcraft-pdm.exe"; Description: "Start SolidCraft PDM"; Flags: nowait postinstall skipifsilent
+; Also after a silent install: that is how the app updates itself (it quits, the installer runs
+; with /SILENT and starts it again).
+Filename: "{app}\solidcraft-pdm.exe"; Description: "Start SolidCraft PDM"; Flags: nowait postinstall

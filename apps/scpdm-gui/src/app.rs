@@ -17,6 +17,7 @@ use crate::backend::{Backend, OpenError};
 use crate::launcher::{self, Launcher};
 use crate::scan::{self, ImageFile, Info, RemoteInfo, Scan};
 use crate::search::{Haystack, Search};
+use crate::update;
 use scformat::compare::{Change, Comparison, FeatureChangeKind};
 
 /// How often the vault is rescanned while the window has focus (cheap: unchanged files are
@@ -46,6 +47,11 @@ struct Settings {
     zoom: f32,
     /// Servers connected to before (address, user); passwords are never kept.
     servers: Vec<(String, String)>,
+    /// Look for a new release once a day (the AppImage and the Windows installation only).
+    check_updates: bool,
+    /// When that was last done (Unix seconds), and a version not to point out again.
+    last_update_check: i64,
+    skipped_update: String,
 }
 
 impl Default for Settings {
@@ -58,6 +64,9 @@ impl Default for Settings {
             hidden_columns: Vec::new(),
             zoom: 1.5,
             servers: Vec::new(),
+            check_updates: true,
+            last_update_check: 0,
+            skipped_update: String::new(),
         }
     }
 }
@@ -160,6 +169,8 @@ enum Dialog {
     Login { password: String, error: Option<String> },
     /// Connect to a server and make a workspace of one of its vaults.
     Connect(ConnectForm),
+    /// A newer release: its notes, and installing it.
+    Update { error: Option<String> },
     Release { path: String, revision: String, note: String },
     Properties { path: String, name: String, values: [String; 7], check_in: bool, comment: String },
 }
@@ -250,6 +261,11 @@ enum Action {
     #[cfg_attr(windows, allow(dead_code))]
     MenuEntry(bool),
     CreateDesign { path: String, part_number: String, description: String, open: bool },
+    /// Look for a newer release now (and say so if there is none).
+    CheckForUpdates,
+    SetUpdateChecks(bool),
+    InstallUpdate,
+    SkipUpdate,
 }
 
 pub struct App {
@@ -288,6 +304,12 @@ pub struct App {
     message: Option<(String, bool)>,
     dialog: Option<Dialog>,
     focused: bool,
+    /// Updates: how this copy is installed, a check under way (asked for by the user: `true`),
+    /// the newer release found, an installation under way.
+    install_kind: update::Kind,
+    update_check: Option<(Receiver<Result<update::Release, String>>, bool)>,
+    update: Option<update::Release>,
+    installing: Option<(Receiver<Result<PathBuf, String>>, Arc<update::Progress>)>,
 }
 
 impl App {
@@ -326,7 +348,15 @@ impl App {
             message: None,
             dialog: None,
             focused: false,
+            install_kind: update::Kind::detect(),
+            update_check: None,
+            update: None,
+            installing: None,
         };
+        let due = now_secs() - app.settings.last_update_check >= 24 * 3600;
+        if app.settings.check_updates && app.install_kind.checks() && due {
+            app.check_for_updates(&cc.egui_ctx, false);
+        }
         let ctx = &cc.egui_ctx;
         match start {
             Some(dir) => app.open_vault(ctx, dir),
@@ -404,6 +434,55 @@ impl App {
             Some(ws) => scan::spawn_remote(ws, known, ctx.clone()),
             None => scan::spawn(backend.root(), known, ctx.clone()),
         });
+    }
+
+    fn check_for_updates(&mut self, ctx: &egui::Context, asked: bool) {
+        self.settings.last_update_check = now_secs();
+        let kind = self.install_kind.clone();
+        self.update_check = Some((update::spawn(ctx, move || update::latest(&update::api(), &kind)), asked));
+    }
+
+    fn poll_updates(&mut self, ctx: &egui::Context) {
+        if let Some((rx, asked)) = &self.update_check {
+            let asked = *asked;
+            match rx.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_check = None,
+                Ok(result) => {
+                    self.update_check = None;
+                    match result {
+                        Ok(release) if release.version > update::current() => {
+                            let skipped = update::version_text(release.version) == self.settings.skipped_update;
+                            self.update = Some(release);
+                            if asked {
+                                self.dialog = Some(Dialog::Update { error: None });
+                            } else if skipped {
+                                self.update = None;
+                            }
+                        }
+                        Ok(_) if asked => self.info_msg(format!("SolidCraft PDM {} is the latest version", env!("CARGO_PKG_VERSION"))),
+                        Err(e) if asked => self.error(e),
+                        // A check of its own accord stays quiet (offline, say).
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if let Some((rx, _)) = &self.installing {
+            let result = match rx.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("The installation stopped".to_owned()),
+                Ok(result) => result,
+            };
+            self.installing = None;
+            match result.and_then(|program| update::start(&self.install_kind, &program).map_err(|e| format!("Cannot start {}: {e}", program.display()))) {
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => self.dialog = Some(Dialog::Update { error: Some(e) }),
+            }
+        }
     }
 
     fn poll_scan(&mut self, ctx: &egui::Context) {
@@ -889,6 +968,26 @@ impl App {
                 Err(e) => self.error(e),
             },
             Action::Refresh => self.start_scan(ctx),
+            Action::CheckForUpdates => self.check_for_updates(ctx, true),
+            Action::SetUpdateChecks(on) => self.settings.check_updates = on,
+            Action::SkipUpdate => {
+                if let Some(release) = self.update.take() {
+                    self.settings.skipped_update = update::version_text(release.version);
+                }
+            }
+            Action::InstallUpdate => {
+                let Some(release) = self.update.clone() else { return };
+                let progress = Arc::new(update::Progress::default());
+                let shared = progress.clone();
+                let kind = self.install_kind.clone();
+                let rx = update::spawn(ctx, move || match &kind {
+                    update::Kind::AppImage(current) => update::install_appimage(&release, current, &shared),
+                    update::Kind::Installer => update::download_installer(&release, &shared),
+                    update::Kind::Other => Err("Download it from the release page".into()),
+                });
+                self.installing = Some((rx, progress));
+                self.dialog = Some(Dialog::Update { error: None });
+            }
             Action::SetOpenCommand(cmd) => {
                 self.settings.open_command = cmd.trim().to_owned();
                 self.detected = launcher::detect();
@@ -1316,6 +1415,12 @@ impl App {
                 ui.label(RichText::new(format!("Interface size: {:.0} %", ui.ctx().zoom_factor() * 100.0)).small().weak());
                 egui::gui_zoom::zoom_menu_buttons(ui);
             });
+            if let Some(release) = &self.update {
+                let label = RichText::new(format!("⬆ Update to {}", update::version_text(release.version))).color(ADDED);
+                if ui.button(label).on_hover_text("What is new, and installing it").clicked() {
+                    self.dialog = Some(Dialog::Update { error: None });
+                }
+            }
             if self.backend.is_none() {
                 return;
             }
@@ -2395,6 +2500,47 @@ impl App {
                         ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                     }
                 }
+                Dialog::Update { error } => match &self.update {
+                    None => close = true,
+                    Some(release) => {
+                        ui.set_min_width(520.0);
+                        ui.heading(format!("SolidCraft PDM {}", update::version_text(release.version)));
+                        ui.weak(format!("You have {}.", env!("CARGO_PKG_VERSION")));
+                        ui.add_space(6.0);
+                        egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.5).show(ui, |ui| release_notes(ui, &release.notes));
+                        ui.add_space(8.0);
+                        let can_install = release.asset.is_some() && release.checksums.is_some() && self.install_kind != update::Kind::Other;
+                        if let Some((_, progress)) = &self.installing {
+                            let bar = egui::ProgressBar::new(progress.fraction().unwrap_or(0.0)).show_percentage();
+                            ui.add(bar.text("Downloading…"));
+                        } else {
+                            if let Some(e) = error {
+                                ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                            }
+                            if !can_install {
+                                let why = match self.install_kind {
+                                    update::Kind::Other => "This copy was not installed from a release: download the new version from the release page.",
+                                    _ => "This release has nothing to install here automatically: download it from the release page.",
+                                };
+                                ui.label(RichText::new(why).small().weak());
+                            }
+                            ui.horizontal(|ui| {
+                                let restart = if self.install_kind == update::Kind::Installer { "Install (the app restarts)" } else { "Install and restart" };
+                                if can_install && ui.button(restart).clicked() {
+                                    actions.push(Action::InstallUpdate);
+                                }
+                                if ui.button("Release page").clicked() {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(&release.page));
+                                }
+                                if ui.button("Skip this version").clicked() {
+                                    actions.push(Action::SkipUpdate);
+                                    close = true;
+                                }
+                                close |= ui.button("Later").clicked();
+                            });
+                        }
+                    }
+                },
                 Dialog::Compare { path, from, to, result } => {
                     ui.set_min_width(680.0);
                     ui.heading(format!("Compare {}", path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f)));
@@ -2537,6 +2683,28 @@ impl App {
                     }
                     #[cfg(not(windows))]
                     menu_entry_settings(ui, actions);
+                    ui.label(RichText::new("Updates").strong());
+                    ui.horizontal_wrapped(|ui| {
+                        let mut on = self.settings.check_updates;
+                        let automatic = self.install_kind.checks();
+                        let checkbox = ui.add_enabled(automatic, egui::Checkbox::new(&mut on, "Look for a new version once a day"));
+                        if checkbox.on_disabled_hover_text("Only the AppImage and the Windows installation look by themselves").changed() {
+                            actions.push(Action::SetUpdateChecks(on));
+                        }
+                        let checking = self.update_check.is_some();
+                        if ui.add_enabled(!checking, egui::Button::new("Check now")).clicked() {
+                            actions.push(Action::CheckForUpdates);
+                        }
+                        if checking {
+                            ui.spinner();
+                        }
+                    });
+                    ui.label(
+                        RichText::new(format!("This is version {}. Releases come from gitlab.com/randomlegend/solidcraft-pdm.", env!("CARGO_PKG_VERSION")))
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(10.0);
                     ui.label(RichText::new("Interface size").strong());
                     ui.horizontal_wrapped(|ui| {
                         let current = ui.ctx().zoom_factor();
@@ -2569,6 +2737,7 @@ impl eframe::App for App {
     /// Everything that is not drawing: scans, rescans, settings, shortcuts.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_scan(ctx);
+        self.poll_updates(ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if self.backend.is_some() && focused && (!self.focused || self.last_scan.elapsed() >= RESCAN_EVERY) {
             self.start_scan(ctx);
@@ -3067,6 +3236,23 @@ fn highlighted(ui: &egui::Ui, text: &str, matches: &[usize]) -> egui::text::Layo
         job.append(c.encode_utf8(&mut [0; 4]), 0.0, format);
     }
     job
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Release notes (the changelog's Markdown): headings bold, the rest as written.
+fn release_notes(ui: &mut egui::Ui, notes: &str) {
+    for line in notes.lines() {
+        let heading = line.trim_start_matches('#');
+        if heading.len() < line.len() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(heading.trim()).strong());
+        } else if !line.trim().is_empty() {
+            ui.add(egui::Label::new(line.replace('*', "").replace('`', "")).wrap());
+        }
+    }
 }
 
 fn unix_time(secs: i64) -> String {

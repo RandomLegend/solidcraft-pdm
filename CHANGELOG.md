@@ -17,6 +17,12 @@ whose heading starts with `## <version>`.
 - The app: *Vault > Connect to a server…*, server statuses and who has a design checked out.
 - The command line: `scpdm remote …`.
 
+### Updates
+
+- The AppImage (and the Windows installation) looks for a new release once a day, shows what
+  is new and, if you want, installs it and restarts. Downloads are checked against the
+  release's `SHA256SUMS`. *Settings > Updates* switches it off or checks now.
+
 ## 0.1.0 — 2026-10-21
 
 The first release: a PDM for SolidCraft designs, for one person, native on Linux.

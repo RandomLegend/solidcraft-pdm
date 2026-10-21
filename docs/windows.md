@@ -69,3 +69,11 @@ machine uses it at a time.
   on Linux; the first run of the manual `windows:build` job is their test.
 - **Still to do**: signing the `.exe` and the installer (Windows SmartScreen warns about
   unsigned downloads).
+
+## Updates
+
+An installed app (the installer's `unins000.exe` next to `solidcraft-pdm.exe`) looks for new
+releases like the AppImage does. It installs a release's `SolidCraft-PDM-<version>-setup.exe`
+if the release has one, listed in its `SHA256SUMS`: the app quits and the installer runs with
+`/SILENT`, then starts it again. Releases have no Windows installer yet (the Windows job is
+manual), so until then the app only points to the release page.

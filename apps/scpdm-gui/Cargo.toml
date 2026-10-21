@@ -23,6 +23,8 @@ egui_extras = { workspace = true }
 image = { workspace = true }
 rfd = { workspace = true }
 nucleo-matcher = { workspace = true }
+sha2 = { workspace = true }
+ureq = { workspace = true }
 
 [dev-dependencies]
 scpdm-server = { path = "../scpdm-server" }

@@ -67,6 +67,21 @@ New designs are written as plain JSON in format 1, which every SolidCraft releas
 upgrades (checked with SolidCraft 0.18.3: it saves such a file as a `solidcraft/29` container
 and keeps its properties).
 
+## Updates
+
+The AppImage and the Windows installation look for a new release once a day (asking
+gitlab.com, nothing else is sent). A newer one shows as *⬆ Update to …* in the menu bar, with
+its notes:
+
+- *Install and restart*: downloads it, checks it against the release's `SHA256SUMS` (a broken
+  or cut-off download changes nothing), puts it in place of the running AppImage (the version
+  in the file name changes with it, and the menu entry follows) and starts it. On Windows the
+  installer runs and starts the app again.
+- *Release page*, *Skip this version* (not pointed out again), *Later*.
+
+*Vault > Settings > Updates* switches the daily look off, or checks now. A build from source
+does not look by itself; *Check now* still tells you about new releases.
+
 ## Working with a team
 
 A vault can also live on a server that a small team shares: see [server.md](server.md).
