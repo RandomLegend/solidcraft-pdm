@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Checked out</title>
+  <path d="M21 29L21 21A11 11 0 0 1 43 21L43 29" fill="none" stroke="currentColor" stroke-width="5.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M15.5 29L48.5 29Q51 29 51 31.5L51 51.5Q51 54 48.5 54L15.5 54Q13 54 13 51.5L13 31.5Q13 29 15.5 29Z" fill="currentColor"/>
+</svg>

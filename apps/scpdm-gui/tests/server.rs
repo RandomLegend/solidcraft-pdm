@@ -154,8 +154,7 @@ fn connects_to_a_server_and_opens_a_vault() {
     let folder = tempfile::tempdir().unwrap();
     let mut h = Harness::builder().with_size([1280.0, 800.0]).with_step_dt(1.0 / 60.0).build_eframe(|cc| App::new(cc, None));
     h.run_steps(3);
-    h.get_by_label("Vault").click();
-    h.run_steps(2);
+    // The start page's card (the Vault menu has the same).
     h.get_by_label("Connect to a server…").click();
     h.run_steps(3);
     type_into(&mut h, "Server", &s.url);

@@ -190,4 +190,7 @@ instead.
 
 The test fixtures and the designs in the screenshots are SolidCraft's own sample designs
 (MIT/Apache-2.0, from [tangency-labs/solidcraft](https://github.com/tangency-labs/solidcraft));
-their thumbnails were rendered by SolidCraft.
+their thumbnails were rendered by SolidCraft. The look follows SolidCraft's: its colour tokens,
+its icons (`assets/icons/solidcraft/`, MIT/Apache-2.0, unmodified; a few in their style in
+`assets/icons/pdm/`) and its interface fonts, IBM Plex Sans and Mono by IBM
+(`assets/fonts/`, SIL Open Font License 1.1, see `assets/fonts/OFL-IBM-Plex.txt`).

@@ -5,6 +5,13 @@ whose heading starts with `## <version>`.
 
 ## Unreleased
 
+### App
+
+- A new look, the one of SolidCraft itself: its colours (dark, or light; *Settings >
+  Appearance*), IBM Plex Sans and Mono, its icons. A dark app bar with the open vault and the
+  server connection, a toolbar with the search, a navigation column, a cleaner list with
+  status dots and release pills, the details as cards with one primary action, a start page.
+
 ### Server
 
 - Automatic backups of users and every vault to another folder: a second disk, or an SMB or

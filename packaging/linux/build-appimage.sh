@@ -22,6 +22,8 @@ rm -rf "$appdir"
 install -Dm755 "$root/target/release/solidcraft-pdm" "$appdir/usr/bin/solidcraft-pdm"
 install -Dm755 "$root/target/release/scpdm" "$appdir/usr/bin/scpdm"
 install -Dm755 "$root/packaging/linux/AppRun" "$appdir/AppRun"
+# The interface fonts (IBM Plex) are built into the program; their licence goes along.
+install -Dm644 "$root/assets/fonts/OFL-IBM-Plex.txt" "$appdir/usr/share/doc/solidcraft-pdm/OFL-IBM-Plex.txt"
 install -Dm644 "$root/packaging/linux/solidcraft-pdm.desktop" "$appdir/usr/share/applications/solidcraft-pdm.desktop"
 install -Dm644 "$root/assets/solidcraft-pdm.svg" "$appdir/usr/share/icons/hicolor/scalable/apps/solidcraft-pdm.svg"
 for size in 16 32 48 64 128 256; do

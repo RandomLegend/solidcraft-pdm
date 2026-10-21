@@ -208,8 +208,9 @@ fn open_demo() -> (tempfile::TempDir, std::path::PathBuf, Harness<'static, App>)
     demo_vault(&root);
     let start = root.clone();
     // 60 fps, so two clicks fit egui's 0.3 s double-click window (the default step is 0.25 s).
+    // 1280 × 900: the app at its usual 150 % on a 1440 px screen, where a design's history fits.
     let mut harness = Harness::builder()
-        .with_size([1280.0, 800.0])
+        .with_size([1280.0, 900.0])
         .with_step_dt(1.0 / 60.0)
         .build_eframe(move |cc| App::new(cc, Some(start)));
     settle(&mut harness);

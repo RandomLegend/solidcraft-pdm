@@ -17,6 +17,8 @@ use crate::backend::{Backend, OpenError};
 use crate::launcher::{self, Launcher};
 use crate::scan::{self, ImageFile, Info, RemoteInfo, Scan};
 use crate::search::{Haystack, Search};
+use crate::icons::{self, Icon};
+use crate::theme::{self, size};
 use crate::update;
 use scformat::compare::{Change, Comparison, FeatureChangeKind};
 
@@ -49,6 +51,8 @@ struct Settings {
     servers: Vec<(String, String)>,
     /// Look for a new release once a day (the AppImage and the Windows installation only).
     check_updates: bool,
+    /// Dark, light, or as the system is.
+    appearance: Appearance,
     /// When that was last done (Unix seconds), and a version not to point out again.
     last_update_check: i64,
     skipped_update: String,
@@ -65,8 +69,26 @@ impl Default for Settings {
             zoom: 1.5,
             servers: Vec::new(),
             check_updates: true,
+            appearance: Appearance::System,
             last_update_check: 0,
             skipped_update: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum Appearance {
+    System,
+    Dark,
+    Light,
+}
+
+impl Appearance {
+    fn preference(self) -> egui::ThemePreference {
+        match self {
+            Appearance::System => egui::ThemePreference::System,
+            Appearance::Dark => egui::ThemePreference::Dark,
+            Appearance::Light => egui::ThemePreference::Light,
         }
     }
 }
@@ -264,6 +286,7 @@ enum Action {
     /// Look for a newer release now (and say so if there is none).
     CheckForUpdates,
     SetUpdateChecks(bool),
+    SetAppearance(Appearance),
     InstallUpdate,
     SkipUpdate,
 }
@@ -316,6 +339,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext, start: Option<PathBuf>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let settings: Settings = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
+        theme::install(&cc.egui_ctx, settings.appearance.preference());
         // Only with settings storage, which the app always has (even on the first run); tests
         // have none and lay out at 100 %.
         if cc.storage.is_some() {
@@ -970,6 +994,10 @@ impl App {
             Action::Refresh => self.start_scan(ctx),
             Action::CheckForUpdates => self.check_for_updates(ctx, true),
             Action::SetUpdateChecks(on) => self.settings.check_updates = on,
+            Action::SetAppearance(choice) => {
+                self.settings.appearance = choice;
+                ctx.set_theme(choice.preference());
+            }
             Action::SkipUpdate => {
                 if let Some(release) = self.update.take() {
                     self.settings.skipped_update = update::version_text(release.version);
@@ -1205,86 +1233,96 @@ impl App {
         use remote::RemoteStatus as R;
         let path = entry.path.clone();
         let me = self.backend.as_ref().and_then(|b| b.workspace().map(|w| w.user().to_owned())).unwrap_or_default();
+        let t = theme::tokens(ui);
         ui.add_space(10.0);
-        ui.label(RichText::new("On the server").strong());
-        if let Some(lock) = &r.lock {
-            let who = if lock.user == me { "you".to_owned() } else { lock.user.clone() };
-            ui.label(format!("Checked out by {who} since {}", unix_time(lock.since)));
-        }
-        if let (Some(server), Some(base)) = (r.server_version, r.base_version) {
-            if server != base {
-                ui.label(format!("v{server} on the server; you have v{base}"));
-            }
-        }
-        let comment_box = |ui: &mut egui::Ui, comment: &mut String| {
-            ui.add(egui::TextEdit::multiline(comment).hint_text("What changed?").desired_rows(2).desired_width(f32::INFINITY));
-        };
-        ui.horizontal_wrapped(|ui| match &r.status {
-            R::NotDownloaded => {
-                if ui.button("Get").on_hover_text("Fetch it into the workspace").clicked() {
-                    actions.push(Action::Get(path.clone()));
-                }
-            }
-            R::NewerOnServer => {
-                if ui.button("Get latest").clicked() {
-                    actions.push(Action::Get(path.clone()));
-                }
-                if ui.button("Check out").on_hover_text("Fetches the latest version and locks it for you").clicked() {
-                    actions.push(Action::Checkout(path.clone()));
-                }
-            }
-            R::UpToDate => {
-                if ui.button("Check out").on_hover_text("Lock it for you, to change it").clicked() {
-                    actions.push(Action::Checkout(path.clone()));
-                }
-            }
-            R::CheckedOutByOther(user) => {
-                ui.weak(format!("{user} is working on it; you can open it read-only."));
-            }
-            R::ChangedWithoutCheckout => {
-                ui.colored_label(ui.visuals().warn_fg_color, "You changed this without checking it out.");
-                if ui.button("Check out now").clicked() {
-                    actions.push(Action::Checkout(path.clone()));
-                }
-            }
-            R::Conflict => {
-                ui.colored_label(ui.visuals().error_fg_color, "Changed here and on the server.");
-                if ui.button("Keep my copy, get the latest…").on_hover_text("Saves your version elsewhere first").clicked() {
-                    actions.push(Action::KeepCopyAndGet(path.clone()));
-                }
-            }
-            R::RemovedOnServer => {
-                ui.weak("No longer on the server (deleted or moved by someone).");
-            }
-            R::CheckedOut { .. } | R::LocalOnly => {}
-        });
-        match &r.status {
-            R::CheckedOut { modified } => {
-                comment_box(ui, &mut self.comment);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.add_enabled(*modified, egui::Button::new("⬆ Check in")).on_disabled_hover_text("Nothing changed yet").clicked() {
-                        actions.push(Action::RemoteCheckin { path: path.clone(), comment: self.comment.clone(), keep: false });
-                    }
-                    if ui.add_enabled(*modified, egui::Button::new("Check in, keep checked out")).clicked() {
-                        actions.push(Action::RemoteCheckin { path: path.clone(), comment: self.comment.clone(), keep: true });
-                    }
-                    if ui.button("Undo check-out").on_hover_text("Keeps your changes here").clicked() {
-                        actions.push(Action::UndoCheckout { path: path.clone(), discard: false });
-                    }
-                    if *modified && ui.button("Undo and discard changes").clicked() {
-                        actions.push(Action::UndoCheckout { path: path.clone(), discard: true });
-                    }
+        theme::card(t).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                icons::show(ui, Icon::Server, 16.0, t.icon);
+                ui.label(RichText::new("On the server").font(theme::semibold(size::HEADING)));
+            });
+            if let Some(lock) = &r.lock {
+                let who = if lock.user == me { "you".to_owned() } else { lock.user.clone() };
+                ui.horizontal(|ui| {
+                    icons::show(ui, Icon::Lock, 14.0, if lock.user == me { t.accent } else { t.other });
+                    ui.label(format!("Checked out by {who} since {}", unix_time(lock.since)));
                 });
             }
-            R::LocalOnly => {
-                ui.label("Not on the server yet.");
-                comment_box(ui, &mut self.comment);
-                if ui.button("⬆ Add to the server").clicked() {
-                    actions.push(Action::AddToServer { path: path.clone(), comment: self.comment.clone() });
+            if let (Some(server), Some(base)) = (r.server_version, r.base_version) {
+                if server != base {
+                    ui.label(RichText::new(format!("v{server} on the server; you have v{base}")).color(t.accent));
                 }
             }
-            _ => {}
-        }
+            let comment_box = |ui: &mut egui::Ui, comment: &mut String| {
+                ui.add(egui::TextEdit::multiline(comment).hint_text("What changed?").desired_rows(2).margin(egui::vec2(8.0, 6.0)).desired_width(f32::INFINITY));
+            };
+            ui.horizontal_wrapped(|ui| match &r.status {
+                R::NotDownloaded => {
+                    if ui.add(theme::primary("Get", t)).on_hover_text("Fetch it into the workspace").clicked() {
+                        actions.push(Action::Get(path.clone()));
+                    }
+                }
+                R::NewerOnServer => {
+                    if ui.add(theme::primary("Get latest", t)).clicked() {
+                        actions.push(Action::Get(path.clone()));
+                    }
+                    if ui.button("Check out").on_hover_text("Fetches the latest version and locks it for you").clicked() {
+                        actions.push(Action::Checkout(path.clone()));
+                    }
+                }
+                R::UpToDate => {
+                    if ui.add(theme::primary("Check out", t)).on_hover_text("Lock it for you, to change it").clicked() {
+                        actions.push(Action::Checkout(path.clone()));
+                    }
+                }
+                R::CheckedOutByOther(user) => {
+                    ui.weak(format!("{user} is working on it; you can open it read-only."));
+                }
+                R::ChangedWithoutCheckout => {
+                    ui.colored_label(ui.visuals().warn_fg_color, "You changed this without checking it out.");
+                    if ui.add(theme::primary("Check out now", t)).clicked() {
+                        actions.push(Action::Checkout(path.clone()));
+                    }
+                }
+                R::Conflict => {
+                    ui.colored_label(ui.visuals().error_fg_color, "Changed here and on the server.");
+                    if ui.button("Keep my copy, get the latest…").on_hover_text("Saves your version elsewhere first").clicked() {
+                        actions.push(Action::KeepCopyAndGet(path.clone()));
+                    }
+                }
+                R::RemovedOnServer => {
+                    ui.weak("No longer on the server (deleted or moved by someone).");
+                }
+                R::CheckedOut { .. } | R::LocalOnly => {}
+            });
+            match &r.status {
+                R::CheckedOut { modified } => {
+                    comment_box(ui, &mut self.comment);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add_enabled(*modified, theme::primary("⬆ Check in", t)).on_disabled_hover_text("Nothing changed yet").clicked() {
+                            actions.push(Action::RemoteCheckin { path: path.clone(), comment: self.comment.clone(), keep: false });
+                        }
+                        if ui.add_enabled(*modified, egui::Button::new("Check in, keep checked out")).clicked() {
+                            actions.push(Action::RemoteCheckin { path: path.clone(), comment: self.comment.clone(), keep: true });
+                        }
+                        if ui.button("Undo check-out").on_hover_text("Keeps your changes here").clicked() {
+                            actions.push(Action::UndoCheckout { path: path.clone(), discard: false });
+                        }
+                        if *modified && ui.button("Undo and discard changes").clicked() {
+                            actions.push(Action::UndoCheckout { path: path.clone(), discard: true });
+                        }
+                    });
+                }
+                R::LocalOnly => {
+                    ui.label("Not on the server yet.");
+                    comment_box(ui, &mut self.comment);
+                    if ui.add(theme::primary("⬆ Add to the server", t)).clicked() {
+                        actions.push(Action::AddToServer { path: path.clone(), comment: self.comment.clone() });
+                    }
+                }
+                _ => {}
+            }
+        });
     }
 
     /// The picture of a side of a comparison.
@@ -1374,9 +1412,38 @@ impl App {
 
     // ---- drawing ----
 
+    /// The app bar (dark in both themes, as SolidCraft's): the app, its menus, the open vault,
+    /// and on the right the server connection, an update and the settings.
     fn top_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("Vault", |ui| {
+        let t = theme::tokens(ui);
+        // Light text and see-through buttons on the dark bar; menus keep the normal look.
+        let v = ui.visuals_mut();
+        v.override_text_color = Some(t.app_bar_text);
+        for w in [&mut v.widgets.inactive, &mut v.widgets.noninteractive] {
+            w.weak_bg_fill = Color32::TRANSPARENT;
+            w.bg_fill = Color32::TRANSPARENT;
+            w.bg_stroke = egui::Stroke::NONE;
+        }
+        for w in [&mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+            w.weak_bg_fill = Color32::from_white_alpha(28);
+            w.bg_fill = Color32::from_white_alpha(28);
+            w.bg_stroke = egui::Stroke::NONE;
+        }
+        ui.horizontal(|ui| {
+            ui.set_height(28.0);
+            ui.add(egui::Image::new(egui::include_image!("../../../assets/solidcraft-pdm-256.png")).fit_to_exact_size(egui::vec2(22.0, 22.0)));
+            ui.label(RichText::new("SolidCraft PDM").font(theme::semibold(size::HEADING)).color(t.app_bar_text));
+            app_bar_divider(ui, t);
+            let menus = |ui: &mut egui::Ui| {
+                // The menus themselves in the normal look: rows, no button frames.
+                ui.reset_style();
+                ui.style_mut().visuals.button_frame = false;
+                ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.set_min_width(220.0);
+            };
+            ui.menu_button(RichText::new("Vault").color(t.app_bar_text), |ui| {
+                menus(ui);
                 if ui.button("Connect to a server…").clicked() {
                     actions.push(Action::AskConnect);
                 }
@@ -1408,31 +1475,78 @@ impl App {
             // Stays open while columns are ticked.
             let keep_open = egui::containers::menu::MenuConfig::new()
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-            egui::containers::menu::MenuButton::new("View").config(keep_open).ui(ui, |ui| {
-                ui.label(RichText::new("Columns").small().weak());
+            egui::containers::menu::MenuButton::new(RichText::new("View").color(t.app_bar_text)).config(keep_open).ui(ui, |ui| {
+                menus(ui);
+                theme::section(ui, "Columns");
                 column_toggles(ui, &self.settings.hidden_columns, actions);
                 ui.separator();
-                ui.label(RichText::new(format!("Interface size: {:.0} %", ui.ctx().zoom_factor() * 100.0)).small().weak());
+                theme::section(ui, &format!("Interface size: {:.0} %", ui.ctx().zoom_factor() * 100.0));
                 egui::gui_zoom::zoom_menu_buttons(ui);
             });
-            if let Some(release) = &self.update {
-                let label = RichText::new(format!("⬆ Update to {}", update::version_text(release.version))).color(ADDED);
-                if ui.button(label).on_hover_text("What is new, and installing it").clicked() {
-                    self.dialog = Some(Dialog::Update { error: None });
+            if let Some(backend) = &self.backend {
+                app_bar_divider(ui, t);
+                // The open vault, as a tab.
+                let (icon, title) = (if backend.is_remote() { Icon::Server } else { Icon::Folder }, backend.title());
+                egui::Frame::new().fill(Color32::from_rgb(0x35, 0x3B, 0x47)).corner_radius(egui::CornerRadius::same(theme::RADIUS)).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        icons::show(ui, icon, 15.0, t.app_bar_text);
+                        ui.label(RichText::new(title).font(theme::medium(size::BODY)).color(t.app_bar_text));
+                    });
+                });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let settings = ui.add(egui::Button::image(icons::image(ui, Icon::Settings, t.app_bar_text).fit_to_exact_size(egui::vec2(17.0, 17.0))).min_size(egui::vec2(30.0, 28.0)));
+                settings.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Settings"));
+                if settings.on_hover_text("Settings").clicked() {
+                    self.detected = launcher::detect();
+                    self.dialog = Some(Dialog::Settings { open_command: self.settings.open_command.clone() });
                 }
-            }
-            if self.backend.is_none() {
-                return;
-            }
-            ui.separator();
-            let folder = match &self.view {
-                View::Folder(f) => f.clone(),
-                _ => String::new(),
+                if let Some(release) = &self.update {
+                    let label = format!("⬆ Update to {}", update::version_text(release.version));
+                    let button = egui::Button::new(RichText::new(label).font(theme::medium(size::BODY)).color(Color32::WHITE)).fill(t.accent).corner_radius(egui::CornerRadius::same(theme::RADIUS));
+                    if ui.add(button).on_hover_text("What is new, and installing it").clicked() {
+                        self.dialog = Some(Dialog::Update { error: None });
+                    }
+                }
+                if let Some(ws) = self.backend.as_ref().and_then(|b| b.workspace()) {
+                    let (dot, text) = match &self.offline {
+                        Some(_) => (t.warning, "Offline".to_owned()),
+                        None => (Color32::from_rgb(0x4C, 0xC2, 0x7A), format!("{} · {}", ws.user(), host_of(ws.client().url()))),
+                    };
+                    // A chip: dot and text, drawn at its own size (the row runs right to left).
+                    let galley = ui.painter().layout_no_wrap(text, theme::medium(size::SMALL + 0.5), t.app_bar_text);
+                    let (rect, response) = ui.allocate_exact_size(galley.size() + egui::vec2(34.0, 10.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, egui::CornerRadius::same(theme::MENU_RADIUS), Color32::from_white_alpha(14));
+                    ui.painter().circle_filled(egui::pos2(rect.left() + 14.0, rect.center().y), 4.0, dot);
+                    ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - galley.size().y / 2.0), galley, t.app_bar_text);
+                    response
+                    .on_hover_text(match &self.offline {
+                        Some(why) => format!("The server is not reachable: {why}"),
+                        None => format!("Connected to {} as {}", ws.client().url(), ws.user()),
+                    });
+                }
+                if self.scan.is_some() {
+                    ui.add(egui::Spinner::new().size(14.0).color(t.app_bar_dim));
+                }
+            });
+        });
+    }
+
+    /// Under the app bar: what to do with the vault, and the search.
+    fn toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let t = theme::tokens(ui);
+        ui.horizontal(|ui| {
+            let folder = self.current_folder();
+            let tool = |ui: &mut egui::Ui, icon: Icon, label: &str, enabled: bool| {
+                let image = icons::image(ui, icon, if enabled { t.icon } else { t.text_dim }).fit_to_exact_size(egui::vec2(16.0, 16.0));
+                ui.add_enabled(enabled, egui::Button::image_and_text(image, label).min_size(egui::vec2(0.0, theme::CONTROL_HEIGHT)))
             };
-            if ui.button("+ New design").on_hover_text("Create an empty design and open it in SolidCraft").clicked() {
+            let new = tool(ui, Icon::Plus, "New design", true);
+            new.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "+ New design"));
+            if new.on_hover_text("Create an empty design and open it in SolidCraft").clicked() {
                 actions.push(Action::AskNewDesign(folder));
             }
-            if ui.button("⟳ Refresh").on_hover_text("Rescan the vault (F5)").clicked() {
+            if tool(ui, Icon::Refresh, "Refresh", true).on_hover_text("Rescan the vault (F5)").clicked() {
                 actions.push(Action::Refresh);
             }
             if self.backend.as_ref().is_some_and(Backend::is_remote) {
@@ -1441,8 +1555,8 @@ impl App {
                     .values()
                     .filter(|r| matches!(r.status, remote::RemoteStatus::NotDownloaded | remote::RemoteStatus::NewerOnServer))
                     .count();
-                if ui
-                    .add_enabled(newer > 0, egui::Button::new(format!("⬇ Get all new and newer ({newer})")))
+                let label = format!("Get all new and newer ({newer})");
+                if tool(ui, Icon::Download, &label, newer > 0)
                     .on_hover_text("Fetch what is new or newer on the server (never over your changes)")
                     .clicked()
                 {
@@ -1450,84 +1564,108 @@ impl App {
                 }
             } else {
                 let changes = self.count(Status::Modified) + self.count(Status::Untracked);
-                if ui
-                    .add_enabled(changes > 0, egui::Button::new("⬆ Check in all…"))
+                if tool(ui, Icon::Upload, "Check in all…", changes > 0)
                     .on_hover_text("Record every modified (and optionally untracked) design as a new version")
                     .clicked()
                 {
                     self.dialog = Some(Dialog::CheckInAll { comment: String::new(), untracked: true });
                 }
             }
-            if self.scan.is_some() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.spinner());
-            }
+            ui.add_space(12.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.scope(|ui| {
+                    ui.spacing_mut().interact_size.y = 14.0;
+                    ui.spacing_mut().slider_width = 100.0;
+                    ui.add(egui::Slider::new(&mut self.settings.thumb_width, ROW_THUMB_WIDTHS).show_value(false)).on_hover_text("Thumbnail size");
+                });
+                icons::show(ui, Icon::Image, 15.0, t.text_dim);
+                ui.add_space(10.0);
+                self.search_bar(ui);
+            });
         });
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
+        let t = theme::tokens(ui);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let small = |text: String| RichText::new(text).size(size::SMALL + 0.5).color(t.text_dim);
             if let Some(backend) = &self.backend {
                 if let Some(ws) = backend.workspace() {
-                    let (text, color) = match &self.offline {
-                        Some(why) => (format!("Offline: {why}"), ui.visuals().warn_fg_color),
-                        None => (format!("{} on {} as {}", ws.vault(), ws.client().url(), ws.user()), ui.visuals().weak_text_color()),
-                    };
-                    ui.colored_label(color, text);
-                    ui.separator();
+                    match &self.offline {
+                        Some(why) => {
+                            ui.label(RichText::new(format!("Offline: {why}")).size(size::SMALL + 0.5).color(t.warning));
+                        }
+                        None => {
+                            ui.label(small(format!("{} on {} as {}", ws.vault(), ws.client().url(), ws.user())));
+                        }
+                    }
+                    status_divider(ui, t);
                 }
-                ui.weak(backend.root().display().to_string());
-                ui.separator();
+                ui.label(RichText::new(backend.root().display().to_string()).font(egui::FontId::monospace(size::SMALL)).color(t.text_dim));
+                status_divider(ui, t);
                 let (untracked, missing) = if backend.is_remote() { ("not on the server", "not downloaded") } else { ("untracked", "missing") };
-                ui.label(format!(
+                ui.label(small(format!(
                     "{} designs · {} modified · {} {untracked} · {} {missing}",
                     self.entries.len(),
                     self.count(Status::Modified),
                     self.count(Status::Untracked),
                     self.count(Status::Missing)
-                ));
+                )));
             }
             if let Some((text, is_error)) = &self.message {
-                ui.separator();
-                if *is_error {
-                    ui.colored_label(ui.visuals().error_fg_color, text);
-                } else {
-                    ui.label(text);
-                }
+                status_divider(ui, t);
+                let color = if *is_error { t.error } else { t.text };
+                ui.label(RichText::new(text).size(size::SMALL + 0.5).color(color));
             }
         });
     }
 
     fn left_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let t = theme::tokens(ui);
             let total = self.entries.len();
             let mut view = self.view.clone();
-            ui.selectable_value(&mut view, View::All, format!("All designs  ({total})"));
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                theme::section(ui, "Library");
+            });
+            ui.add_space(4.0);
+            if theme::nav_row(ui, Some(Icon::Library), "All designs", Some(total), None, view == View::All).clicked() {
+                view = View::All;
+            }
             let remote = self.backend.as_ref().is_some_and(Backend::is_remote);
             for status in [Status::Modified, Status::Untracked, Status::Missing] {
                 let n = self.count(status);
                 if n > 0 || self.view == View::Status(status) {
                     let (label, color) = match (remote, status) {
                         // In a workspace these are designs not fetched yet, or new ones of yours.
-                        (true, Status::Missing) => ("Not downloaded", Color32::from_rgb(120, 145, 185)),
-                        (true, Status::Untracked) => ("Not on the server", Color32::from_rgb(120, 145, 185)),
+                        (true, Status::Missing) => ("Not downloaded", t.accent),
+                        (true, Status::Untracked) => ("Not on the server", t.accent),
                         _ => status_style(status),
                     };
-                    let text = RichText::new(format!("{label}  ({n})")).color(color);
-                    ui.selectable_value(&mut view, View::Status(status), text);
+                    let row = theme::nav_row(ui, Some(Icon::Filter), label, Some(n), Some(color), view == View::Status(status));
+                    if row.clicked() {
+                        view = View::Status(status);
+                    }
                 }
             }
 
             for state in [vault::State::Released, vault::State::Obsolete] {
                 let n = self.entries.iter().filter(|e| e.state == Some(state)).count();
                 if n > 0 || self.view == View::Lifecycle(state) {
-                    let label = if state == vault::State::Released { "Released" } else { "Obsolete" };
-                    ui.selectable_value(&mut view, View::Lifecycle(state), format!("{label}  ({n})"));
+                    let (label, icon) = if state == vault::State::Released { ("Released", Icon::Check) } else { ("Obsolete", Icon::Close) };
+                    if theme::nav_row(ui, Some(icon), label, Some(n), None, view == View::Lifecycle(state)).clicked() {
+                        view = View::Lifecycle(state);
+                    }
                 }
             }
-            ui.add_space(8.0);
+            ui.add_space(14.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Folders").strong());
+                ui.add_space(10.0);
+                theme::section(ui, "Folders");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let parent = match &view {
                         View::Folder(f) => f.clone(),
@@ -1538,13 +1676,20 @@ impl App {
                     } else {
                         format!("New folder in {parent}")
                     };
-                    if ui.small_button("+ New folder").on_hover_text(hint).clicked() {
+                    let plus = egui::Button::image(icons::image(ui, Icon::Plus, t.text_dim).fit_to_exact_size(egui::vec2(13.0, 13.0))).frame(false);
+                    let response = ui.add(plus);
+                    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "+ New folder"));
+                    if response.on_hover_text(hint).clicked() {
                         actions.push(Action::AskNewFolder(parent));
                     }
                 });
             });
+            ui.add_space(4.0);
             let top = self.entries.iter().filter(|e| !e.path.contains('/')).count();
-            let response = ui.selectable_value(&mut view, View::TopLevel, format!("Top level  ({top})"));
+            let response = theme::nav_row(ui, Some(Icon::Home), "Top level", Some(top), None, view == View::TopLevel);
+            if response.clicked() {
+                view = View::TopLevel;
+            }
             drop_target(ui, &response, "", actions);
             response.context_menu(|ui| {
                 if ui.button("New design here…").clicked() {
@@ -1561,8 +1706,11 @@ impl App {
                 children.entry(f.rsplit_once('/').map_or("", |(p, _)| p)).or_default().push(f);
             }
             self.folder_tree(ui, "", &children, &mut view, actions);
-            ui.add_space(6.0);
-            ui.label(RichText::new("Drag designs onto a folder to move them.").small().weak());
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(RichText::new("Drag designs onto a folder to move them.").size(size::SMALL).color(t.text_dim));
+            });
             if view != self.view {
                 self.view = view;
                 self.search.clear();
@@ -1605,7 +1753,12 @@ impl App {
         let name = folder.rsplit_once('/').map_or(folder, |(_, n)| n);
         let prefix = format!("{folder}/");
         let n = self.entries.iter().filter(|e| e.path.starts_with(&prefix)).count();
-        let response = ui.selectable_value(view, View::Folder(folder.to_owned()), format!("{name}  ({n})"));
+        let selected = *view == View::Folder(folder.to_owned());
+        let icon = if selected { Icon::FolderOpen } else { Icon::Folder };
+        let response = theme::nav_row(ui, Some(icon), name, Some(n), None, selected);
+        if response.clicked() {
+            *view = View::Folder(folder.to_owned());
+        }
         drop_target(ui, &response, folder, actions);
         let empty = n == 0 && !children.contains_key(folder) && !self.images.iter().any(|i| i.file.path.starts_with(&prefix));
         response.context_menu(|ui| {
@@ -1632,31 +1785,46 @@ impl App {
         });
     }
 
+    /// The search field (in a right-to-left row: it takes the room that is left).
     fn search_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let slider_width = 140.0;
-            let clear_width = if self.search.is_empty() { 0.0 } else { 28.0 };
-            let edit = egui::TextEdit::singleline(&mut self.search)
-                .hint_text("Search all designs: file, name, part number, description…   (Ctrl+F)")
-                .margin(egui::vec2(8.0, 6.0))
-                .desired_width(ui.available_width() - slider_width - clear_width - 3.0 * ui.spacing().item_spacing.x);
-            let response = ui.add(edit);
-            if std::mem::take(&mut self.focus_search) {
-                response.request_focus();
-            }
-            // The field gives up focus as Escape is pressed.
-            if (response.has_focus() || response.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.search.clear();
-            }
-            if !self.search.is_empty() && ui.button("×").on_hover_text("Clear the search (Esc)").clicked() {
-                self.search.clear();
-            }
-            ui.add_sized(
-                [slider_width, 20.0],
-                egui::Slider::new(&mut self.settings.thumb_width, ROW_THUMB_WIDTHS).show_value(false),
-            )
-            .on_hover_text("Thumbnail size");
+        let t = theme::tokens(ui);
+        let width = ui.available_width().clamp(200.0, 560.0);
+        let focused = ui.memory(|m| m.focused()) == Some(egui::Id::new("search"));
+        let frame = egui::Frame::new()
+            .fill(t.field)
+            .stroke(egui::Stroke::new(1.0, if focused { t.primary } else { t.control_border }))
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+            .inner_margin(egui::Margin::symmetric(8, 3));
+        let shown = frame.show(ui, |ui| {
+            ui.set_width(width - 18.0);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                icons::show(ui, Icon::Search, 15.0, t.text_dim);
+                let keys = if self.search.is_empty() { 52.0 } else { 26.0 };
+                let edit = egui::TextEdit::singleline(&mut self.search)
+                    .id(egui::Id::new("search"))
+                    .frame(egui::Frame::NONE)
+                    .hint_text(RichText::new("Search all designs: file, name, part number, description…").color(t.text_dim))
+                    .desired_width(ui.available_width() - keys);
+                let response = ui.add(edit);
+                if std::mem::take(&mut self.focus_search) {
+                    response.request_focus();
+                }
+                // The field gives up focus as Escape is pressed.
+                if (response.has_focus() || response.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.search.clear();
+                }
+                if self.search.is_empty() {
+                    keycap(ui, "Ctrl F");
+                } else if ui.add(egui::Button::image(icons::image(ui, Icon::Close, t.text_dim).fit_to_exact_size(egui::vec2(12.0, 12.0))).frame(false)).on_hover_text("Clear the search (Esc)").clicked() {
+                    self.search.clear();
+                }
+            });
         });
+        if focused {
+            // SolidCraft's focus halo.
+            let halo = shown.response.rect.expand(2.5);
+            ui.painter().rect_stroke(halo, egui::CornerRadius::same(theme::RADIUS + 2), egui::Stroke::new(2.5, t.accent_soft), egui::StrokeKind::Outside);
+        }
     }
 
     /// The folder new designs go into from the list: the one shown ("" for the top level).
@@ -1668,7 +1836,6 @@ impl App {
     }
 
     fn list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        self.search_bar(ui);
         self.refilter();
         let searching = !self.search.trim().is_empty();
         if searching {
@@ -1722,10 +1889,15 @@ impl App {
         let date_in_name = !self.settings.hidden_columns.contains(&ListColumn::Modified) && !columns.contains(&ListColumn::Modified);
         let hidden = &self.settings.hidden_columns;
         let folders = &self.folders;
+        let t = theme::tokens(ui);
+        let clip = ui.clip_rect();
+        // Column handles show only while hovered.
+        ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+        ui.visuals_mut().selection.stroke = egui::Stroke::new(1.0, t.selected_ink);
         let mut table = TableBuilder::new(ui)
             // Widths are kept per column position: another column set gets its own.
             .id_salt(("list", &columns, remote))
-            .striped(true)
+            .striped(false)
             .resizable(true)
             .sense(egui::Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -1735,12 +1907,13 @@ impl App {
             table = table.column(Column::initial(c.width(remote)).at_least(c.width(remote).min(60.0)).clip(true));
         }
         table
-            .header(text_height + 8.0, |mut h| {
+            .header(text_height + 12.0, |mut h| {
                 let titles = ["", "Design"].into_iter().chain(columns.iter().map(|c| c.title()));
                 for title in titles {
-                    let (_, response) = h.col(|ui| {
-                        ui.strong(title);
+                    let (rect, response) = h.col(|ui| {
+                        ui.add(egui::Label::new(RichText::new(title).font(theme::semibold(size::SMALL)).color(t.text_dim)).selectable(false));
                     });
+                    ui_rule_under(&response, rect, t, clip);
                     let response = response.on_hover_text("Right-click to choose the columns");
                     egui::Popup::context_menu(&response)
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -1759,7 +1932,7 @@ impl App {
                     });
 
                     // The texts of the row: second line, third line, and each column.
-                    let (sub, description, cells): (Vec<String>, Option<&str>, Vec<RichText>) = match r.item {
+                    let (sub, description, cells): (Vec<String>, Option<&str>, Vec<Cell>) = match r.item {
                         Item::Design(d) => {
                             let e = &self.entries[d];
                             let info = self.info(e);
@@ -1775,26 +1948,32 @@ impl App {
                                     ListColumn::Status => match self.remote.get(&e.path) {
                                         Some(r) => {
                                             let (label, color) = remote_style(&r.status);
-                                            RichText::new(label).color(color)
+                                            Cell::Status(label, color)
                                         }
                                         None => {
                                             let (label, color) = status_style(e.status);
-                                            RichText::new(label).color(color)
+                                            Cell::Status(label.to_owned(), color)
                                         }
                                     },
-                                    ListColumn::State => state_text(e),
-                                    ListColumn::Version => latest.map_or("-".into(), |v| format!("v{}", v.number)).into(),
-                                    ListColumn::PartNumber => props
-                                        .and_then(|m| m.part_number.clone())
-                                        .or_else(|| latest.and_then(|v| v.part_number.clone()))
-                                        .unwrap_or_else(|| "-".into())
-                                        .into(),
-                                    ListColumn::Revision => props
-                                        .and_then(|m| m.revision.clone())
-                                        .or_else(|| latest.and_then(|v| v.revision.clone()))
-                                        .unwrap_or_else(|| "-".into())
-                                        .into(),
-                                    ListColumn::Modified => e.modified.map_or("-".into(), system_time).into(),
+                                    ListColumn::State => state_cell(e),
+                                    ListColumn::Version => Cell::Text(latest.map_or("-".into(), |v| format!("v{}", v.number)).into()),
+                                    ListColumn::PartNumber => Cell::Text(
+                                        RichText::new(
+                                            props
+                                                .and_then(|m| m.part_number.clone())
+                                                .or_else(|| latest.and_then(|v| v.part_number.clone()))
+                                                .unwrap_or_else(|| "-".into()),
+                                        )
+                                        .font(egui::FontId::monospace(size::SMALL + 0.5)),
+                                    ),
+                                    ListColumn::Revision => Cell::Text(
+                                        props
+                                            .and_then(|m| m.revision.clone())
+                                            .or_else(|| latest.and_then(|v| v.revision.clone()))
+                                            .unwrap_or_else(|| "-".into())
+                                            .into(),
+                                    ),
+                                    ListColumn::Modified => Cell::Text(RichText::new(e.modified.map_or("-".into(), system_time)).color(theme::now().text_dim)),
                                 })
                                 .collect();
                             (sub, description, cells)
@@ -1810,9 +1989,9 @@ impl App {
                             let cells = columns
                                 .iter()
                                 .map(|c| match c {
-                                    ListColumn::Status => RichText::new("Image").weak(),
-                                    ListColumn::Modified => image.file.modified.map_or("-".into(), system_time).into(),
-                                    _ => RichText::new("-").weak(),
+                                    ListColumn::Status => Cell::Text(RichText::new("Image").weak()),
+                                    ListColumn::Modified => Cell::Text(RichText::new(image.file.modified.map_or("-".into(), system_time)).color(theme::now().text_dim)),
+                                    _ => Cell::Text(RichText::new("-").weak()),
                                 })
                                 .collect();
                             (sub, None, cells)
@@ -1823,7 +2002,7 @@ impl App {
                         let block = text_height * (lines + 0.4);
                         ui.vertical(|ui| {
                             ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
-                            ui.add(egui::Label::new(highlighted(ui, file, &r.matches)).truncate().selectable(false));
+                            ui.add(egui::Label::new(highlighted(ui, file, &r.matches, theme::medium(size::HEADING - 0.5))).truncate().selectable(false));
                             let sub = sub.iter().filter(|s| !s.is_empty()).map(String::as_str).collect::<Vec<_>>().join("  ·  ");
                             ui.add(egui::Label::new(RichText::new(sub).weak().small()).truncate().selectable(false));
                             if let Some(d) = description {
@@ -1831,13 +2010,23 @@ impl App {
                             }
                         });
                     });
-                    for text in cells {
-                        row.col(|ui| {
-                            ui.add(egui::Label::new(text).truncate().selectable(false));
+                    for cell in cells {
+                        row.col(|ui| match cell {
+                            Cell::Text(text) => {
+                                ui.add(egui::Label::new(text).truncate().selectable(false));
+                            }
+                            Cell::Status(text, color) => {
+                                theme::status(ui, &text, color, egui::FontId::proportional(size::BODY));
+                            }
+                            Cell::Pill(text, ink, fill) => {
+                                theme::pill(ui, &text, ink, fill);
+                            }
                         });
                     }
 
                     let response = row.response();
+                    // A hairline between rows.
+                    response.ctx.layer_painter(response.layer_id).with_clip_rect(clip).hline(response.rect.x_range(), response.rect.bottom() - 0.5, egui::Stroke::new(1.0, theme::now().rule));
                     let is_image = matches!(r.item, Item::Image(_));
                     let present = match r.item {
                         Item::Design(d) => self.entries[d].status != Status::Missing,
@@ -1912,17 +2101,21 @@ impl App {
         let held = lock.map(|l| if Some(&l.user) == me.as_ref() { "you".to_owned() } else { l.user.clone() });
         let by_other = held.as_deref().filter(|h| *h != "you").map(|h| format!("Checked out by {h}"));
 
+        let t = theme::tokens(ui);
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            ui.add_space(6.0);
-            let drawn = thumbnail(ui, image, THUMB, egui::Sense::hover());
+            ui.spacing_mut().item_spacing.y = 6.0;
+            let width = ui.available_width() - 4.0;
+            let height = (width / THUMB_ASPECT).min(THUMB.y * 1.15);
+            let drawn = thumbnail(ui, image, egui::vec2(width.min(height * THUMB_ASPECT * 1.25), height), egui::Sense::hover());
             let preview = clickable(ui, drawn, "preview");
             if entry.status != Status::Missing && preview.on_hover_text("Double-click to open in SolidCraft").double_clicked() {
                 actions.push(Action::Open(entry.path.clone()));
             }
             ui.add_space(6.0);
-            ui.heading(&file);
-            ui.weak(&entry.path);
-            ui.horizontal(|ui| {
+            ui.add(egui::Label::new(RichText::new(&file).font(theme::semibold(size::ARTICLE + 1.0)).color(t.text)).wrap());
+            ui.add(egui::Label::new(RichText::new(&entry.path).font(egui::FontId::monospace(size::SMALL + 0.5)).color(t.text_dim)).wrap());
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
                 let (label, color) = match self.remote.get(&entry.path) {
                     Some(r) => remote_style(&r.status),
                     None => {
@@ -1930,9 +2123,9 @@ impl App {
                         (l.to_owned(), c)
                     }
                 };
-                ui.label(RichText::new(label).color(color).strong());
+                theme::pill(ui, &label, color, color.gamma_multiply(0.16));
                 if let Some(v) = &latest {
-                    ui.label(format!("· v{} of {}", v.number, self.history.len()));
+                    theme::pill(ui, &format!("v{} of {}", v.number, self.history.len()), t.label, t.panel_header);
                 }
             });
             if let Some((lifecycle, next)) = self.lifecycle.clone() {
@@ -1949,19 +2142,20 @@ impl App {
                 });
             }
 
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 let present = entry.status != Status::Missing;
-                if ui.add_enabled(present, egui::Button::new("Open in SolidCraft")).clicked() {
+                let open = egui::Button::image_and_text(
+                    icons::image(ui, Icon::OpenDesign, Color32::WHITE).fit_to_exact_size(egui::vec2(16.0, 16.0)),
+                    RichText::new("Open in SolidCraft").font(theme::medium(size::BUTTON)).color(Color32::WHITE),
+                )
+                .fill(t.primary)
+                .stroke(egui::Stroke::new(1.0, t.primary))
+                .min_size(egui::vec2(0.0, theme::CONTROL_HEIGHT));
+                if ui.add_enabled(present, open).clicked() {
                     actions.push(Action::Open(entry.path.clone()));
                 }
-                if ui.add_enabled(present, egui::Button::new("Show in folder")).clicked() {
-                    actions.push(Action::ShowInFolder(entry.path.clone()));
-                }
-                let movable = ui.add_enabled(present && by_other.is_none(), egui::Button::new("Move / rename…"));
-                if movable.on_disabled_hover_text(by_other.as_deref().unwrap_or_default()).clicked() {
-                    self.dialog = Some(Dialog::Rename { from: entry.path.clone(), to: entry.path.clone() });
-                }
+                let mut rename = false;
                 // The server writes the properties as a new version: not while anyone has it.
                 let readable = info.is_some();
                 let why = match held.as_deref() {
@@ -1970,11 +2164,30 @@ impl App {
                     None => "Not a readable SolidCraft design".to_owned(),
                 };
                 if ui
-                    .add_enabled(present && readable && held.is_none(), egui::Button::new("Edit properties…"))
+                    .add_enabled(present && readable && held.is_none(), theme::secondary("Edit properties…"))
                     .on_disabled_hover_text(why)
                     .clicked()
                 {
                     actions.push(Action::AskEditProperties(entry.path.clone()));
+                }
+                // The rarer ones in a menu.
+                let more = egui::Button::new(RichText::new("···").font(theme::bold(size::SUBTITLE))).min_size(egui::vec2(32.0, theme::CONTROL_HEIGHT));
+                egui::containers::menu::MenuButton::from_button(more).ui(ui, |ui| {
+                    ui.style_mut().visuals.button_frame = false;
+                    ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+                    ui.set_min_width(180.0);
+                    if ui.add_enabled(present, egui::Button::new("Show in folder")).clicked() {
+                        actions.push(Action::ShowInFolder(entry.path.clone()));
+                    }
+                    let movable = ui.add_enabled(present && by_other.is_none(), egui::Button::new("Move / rename…"));
+                    if movable.on_disabled_hover_text(by_other.as_deref().unwrap_or_default()).clicked() {
+                        rename = true;
+                    }
+                })
+                .0
+                .on_hover_text("Show in folder, move or rename");
+                if rename {
+                    self.dialog = Some(Dialog::Rename { from: entry.path.clone(), to: entry.path.clone() });
                 }
             });
 
@@ -1982,28 +2195,34 @@ impl App {
                 self.remote_panel(ui, &entry, &r, actions);
             } else if matches!(entry.status, Status::Modified | Status::Untracked) {
                 ui.add_space(10.0);
-                ui.label(RichText::new(if entry.status == Status::Untracked { "Add to vault" } else { "Check in" }).strong());
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.comment)
-                        .hint_text("What changed?")
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY),
-                );
-                let label = if entry.status == Status::Untracked { "Add as v1" } else { "Check in as new version" };
-                let next = latest.as_ref().map_or(1, |v| v.number + 1);
-                if ui.button(format!("⬆ {label}")).on_hover_text(format!("Records the file's current content as v{next}")).clicked() {
-                    actions.push(Action::CheckIn { path: entry.path.clone(), comment: self.comment.clone() });
-                }
+                theme::card(t).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let title = if entry.status == Status::Untracked { "Add to vault" } else { "Check in" };
+                    ui.label(RichText::new(title).font(theme::semibold(size::HEADING)));
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.comment)
+                            .hint_text("What changed?")
+                            .desired_rows(2)
+                            .margin(egui::vec2(8.0, 6.0))
+                            .desired_width(f32::INFINITY),
+                    );
+                    let label = if entry.status == Status::Untracked { "Add as v1" } else { "Check in as new version" };
+                    let next = latest.as_ref().map_or(1, |v| v.number + 1);
+                    if ui.add(theme::primary(format!("⬆ {label}"), t)).on_hover_text(format!("Records the file's current content as v{next}")).clicked() {
+                        actions.push(Action::CheckIn { path: entry.path.clone(), comment: self.comment.clone() });
+                    }
+                });
             }
 
-            ui.add_space(10.0);
-            egui::CollapsingHeader::new(RichText::new("Properties").strong()).default_open(true).show(ui, |ui| {
+            ui.add_space(12.0);
+            theme::rule(ui);
+            egui::CollapsingHeader::new(RichText::new("Properties").font(theme::semibold(size::HEADING))).default_open(true).show(ui, |ui| {
                 properties(ui, &entry, info.as_ref(), latest.as_ref());
             });
 
             if let Some(info) = &info {
                 if !info.links.is_empty() {
-                    egui::CollapsingHeader::new(RichText::new(format!("Uses ({})", info.links.len())).strong())
+                    egui::CollapsingHeader::new(RichText::new(format!("Uses ({})", info.links.len())).font(theme::semibold(size::HEADING)))
                         .default_open(true)
                         .show(ui, |ui| {
                             for link in &info.links {
@@ -2017,7 +2236,7 @@ impl App {
             }
             let used_in = self.used_in(&entry.path);
             if !used_in.is_empty() {
-                egui::CollapsingHeader::new(RichText::new(format!("Used in ({})", used_in.len())).strong())
+                egui::CollapsingHeader::new(RichText::new(format!("Used in ({})", used_in.len())).font(theme::semibold(size::HEADING)))
                     .default_open(true)
                     .show(ui, |ui| {
                         for path in used_in {
@@ -2028,7 +2247,7 @@ impl App {
                     });
             }
 
-            egui::CollapsingHeader::new(RichText::new(format!("History ({})", self.history.len())).strong())
+            egui::CollapsingHeader::new(RichText::new(format!("History ({})", self.history.len())).font(theme::semibold(size::HEADING)))
                 .default_open(true)
                 .show(ui, |ui| {
                     if self.history.is_empty() {
@@ -2070,30 +2289,33 @@ impl App {
             if preview.on_hover_text("Double-click to open").double_clicked() {
                 actions.push(Action::OpenFile(path.clone()));
             }
+            let t = theme::tokens(ui);
             ui.add_space(6.0);
-            ui.heading(&file);
-            ui.weak(&path);
-            ui.label(RichText::new("Reference image (shown, not versioned)").weak());
+            ui.add(egui::Label::new(RichText::new(&file).font(theme::semibold(size::ARTICLE + 1.0))).wrap());
+            ui.add(egui::Label::new(RichText::new(&path).font(egui::FontId::monospace(size::SMALL + 0.5)).color(t.text_dim)).wrap());
+            ui.add_space(2.0);
+            ui.label(RichText::new("Reference image (shown, not versioned)").color(t.text_dim));
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 image_server_buttons(ui, self.remote.get(&path).map(|r| &r.status), &path, actions);
-                if ui.button("Open").clicked() {
+                if ui.add(theme::primary("Open", t)).clicked() {
                     actions.push(Action::OpenFile(path.clone()));
                 }
-                if ui.button("Show in folder").clicked() {
+                if ui.add(theme::secondary("Show in folder")).clicked() {
                     actions.push(Action::ShowInFolder(path.clone()));
                 }
-                if ui.button("Move / rename…").clicked() {
+                if ui.add(theme::secondary("Move / rename…")).clicked() {
                     self.dialog = Some(Dialog::Rename { from: path.clone(), to: path.clone() });
                 }
             });
             ui.add_space(10.0);
-            egui::Grid::new("image-properties").num_columns(2).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+            ui.add_space(4.0);
+            theme::rule(ui);
+            ui.add_space(4.0);
+            egui::Grid::new("image-properties").num_columns(2).spacing([16.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
                 let mut row = |label: &str, value: Option<String>| {
                     if let Some(v) = value {
-                        ui.weak(label);
-                        ui.label(v);
-                        ui.end_row();
+                        theme::field_row(ui, label, &v);
                     }
                 };
                 row("Dimensions", pixels.map(|(w, h)| format!("{w} × {h} px")));
@@ -2146,9 +2368,10 @@ impl App {
         actions: &mut Vec<Action>,
     ) {
         let is_working = same == Sameness::Working;
-        let mut frame = egui::Frame::group(ui.style());
+        let t = theme::tokens(ui);
+        let mut frame = theme::card(t).inner_margin(egui::Margin::same(8));
         if is_working {
-            frame = frame.stroke(egui::Stroke::new(1.5, ui.visuals().selection.stroke.color));
+            frame = frame.stroke(egui::Stroke::new(1.5, t.accent));
         }
         let mut buttons_top = f32::INFINITY;
         let shown = frame.show(ui, |ui| {
@@ -2157,11 +2380,11 @@ impl App {
                 thumbnail(ui, image, HISTORY_THUMB, egui::Sense::hover());
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("v{}", v.number)).strong());
-                        ui.weak(format!("{} · {}", unix_time(v.created_at), v.author));
+                        ui.label(RichText::new(format!("v{}", v.number)).font(theme::semibold(size::HEADING)));
+                        ui.label(RichText::new(format!("{} · {}", unix_time(v.created_at), v.author)).color(t.text_dim));
                         match same {
                             Sameness::Working => {
-                                ui.label(RichText::new("working file").small().color(ui.visuals().selection.stroke.color));
+                                theme::pill(ui, "working file", t.accent, t.accent_soft);
                             }
                             Sameness::SameContent => {
                                 ui.label(RichText::new("same as working file").small().weak());
@@ -2171,7 +2394,7 @@ impl App {
                     });
                     let release = self.lifecycle.as_ref().and_then(|(l, _)| l.releases.iter().find(|r| r.version == v.number));
                     if let Some(r) = release {
-                        ui.label(RichText::new(format!("Revision {}", r.revision)).color(ADDED).strong());
+                        ui.label(RichText::new(format!("Revision {}", r.revision)).color(added()).strong());
                     }
                     if !v.comment.is_empty() {
                         ui.label(&v.comment);
@@ -2217,33 +2440,58 @@ impl App {
         }
     }
 
+    /// The start page (no vault open): open, make or connect to one, or a recent one.
     fn welcome(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.25);
-            ui.heading("SolidCraft PDM");
-            ui.add_space(6.0);
-            ui.label("A vault is a folder of SolidCraft designs whose versions are kept in a hidden .pdm folder.");
-            ui.label("Your design files stay where they are and open in SolidCraft as before.");
-            ui.add_space(16.0);
+        let t = theme::tokens(ui);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let width = ui.available_width().min(940.0);
+            let side = ((ui.available_width() - width) / 2.0).max(24.0);
             ui.horizontal(|ui| {
-                let width = 2.0 * 160.0 + ui.spacing().item_spacing.x;
-                ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
-                if ui.add_sized([160.0, 32.0], egui::Button::new("Open vault…")).clicked() {
-                    actions.push(Action::PickVault);
-                }
-                if ui.add_sized([160.0, 32.0], egui::Button::new("New vault…")).clicked() {
-                    actions.push(Action::NewVault);
-                }
-            });
-            if !self.settings.recent.is_empty() {
-                ui.add_space(20.0);
-                ui.weak("Recent");
-                for p in &self.settings.recent {
-                    if ui.link(p.display().to_string()).clicked() {
-                        actions.push(Action::OpenVault(p.clone()));
+                ui.add_space(side);
+                ui.vertical(|ui| {
+                    ui.set_width(width - 48.0);
+                    ui.add_space(40.0);
+                    ui.label(RichText::new("Start").font(theme::semibold(size::DISPLAY + 4.0)).color(t.text));
+                    ui.label(
+                        RichText::new("A vault is a folder of SolidCraft designs whose versions are kept in a hidden .pdm folder. Your files stay where they are and open in SolidCraft as before.")
+                            .size(size::SUBTITLE - 1.0)
+                            .color(t.text_dim),
+                    );
+                    ui.add_space(24.0);
+                    ui.label(RichText::new("Open").font(theme::semibold(size::SUBTITLE + 2.0)));
+                    ui.add_space(4.0);
+                    ui.columns(3, |cols| {
+                        let choices = [
+                            (Icon::FolderOpen, "Open vault…", "A folder of designs on this computer", Action::PickVault),
+                            (Icon::NewDesign, "New vault…", "Make a folder a vault", Action::NewVault),
+                            (Icon::Server, "Connect to a server…", "A vault your team shares", Action::AskConnect),
+                        ];
+                        for (col, (icon, title, text, action)) in cols.iter_mut().zip(choices) {
+                            if start_card(col, icon, title, text).clicked() {
+                                actions.push(action);
+                            }
+                        }
+                    });
+                    if !self.settings.recent.is_empty() {
+                        ui.add_space(28.0);
+                        ui.label(RichText::new("Recent").font(theme::semibold(size::SUBTITLE + 2.0)));
+                        ui.add_space(4.0);
+                        theme::card(t).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            for (i, p) in self.settings.recent.iter().enumerate() {
+                                if i > 0 {
+                                    theme::rule(ui);
+                                }
+                                if recent_row(ui, p).clicked() {
+                                    actions.push(Action::OpenVault(p.clone()));
+                                }
+                            }
+                        });
                     }
-                }
-            }
+                    ui.add_space(32.0);
+                });
+            });
         });
     }
 
@@ -2258,7 +2506,15 @@ impl App {
         };
         let Some(dialog) = &mut self.dialog else { return };
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("dialog")).show(ctx, |ui| {
+        let t = theme::tokens_of(ctx);
+        let frame = egui::Frame::new()
+            .fill(t.card)
+            .stroke(egui::Stroke::new(1.0, t.card_border))
+            .corner_radius(egui::CornerRadius::same(theme::MENU_RADIUS))
+            .inner_margin(egui::Margin::same(22))
+            .shadow(ctx.global_style().visuals.window_shadow);
+        let modal = egui::Modal::new(egui::Id::new("dialog")).frame(frame).show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 7.0;
             ui.set_max_width(460.0);
             match dialog {
                 Dialog::Restore { path, number } => {
@@ -2273,11 +2529,11 @@ impl App {
                     );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button(format!("Restore v{number}")).clicked() {
+                        if ui.add(theme::primary(format!("Restore v{number}"), t)).clicked() {
                             actions.push(Action::Restore { path: path.clone(), number: *number });
                             close = true;
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
                 Dialog::Rename { from, to } => {
@@ -2292,13 +2548,13 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let ok = to.trim() != from.as_str() && !to.trim().is_empty();
-                        if ui.add_enabled(ok, egui::Button::new("Move")).clicked()
+                        if ui.add_enabled(ok, theme::primary("Move", t)).clicked()
                             || (ok && edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                         {
                             actions.push(Action::Rename { from: from.clone(), to: to.clone() });
                             close = true;
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
                 Dialog::CheckInAll { comment, untracked } => {
@@ -2311,11 +2567,11 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let n = modified + if *untracked { new } else { 0 };
-                        if ui.add_enabled(n > 0, egui::Button::new(format!("Check in {n}"))).clicked() {
+                        if ui.add_enabled(n > 0, theme::primary(format!("Check in {n}"), t)).clicked() {
                             actions.push(Action::CheckInAll { comment: comment.clone(), untracked: *untracked });
                             close = true;
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
                 Dialog::MakeVault { dir } => {
@@ -2324,11 +2580,11 @@ impl App {
                     ui.label("Creating one adds a hidden .pdm folder there; your files are not changed.");
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Create vault here").clicked() {
+                        if ui.add(theme::primary("Create vault here", t)).clicked() {
                             actions.push(Action::MakeVault(dir.clone()));
                             close = true;
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
                 Dialog::NewFolder { parent, name } => {
@@ -2348,13 +2604,13 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let ok = !trimmed.is_empty() && !exists;
-                        if ui.add_enabled(ok, egui::Button::new("Create")).clicked()
+                        if ui.add_enabled(ok, theme::primary("Create", t)).clicked()
                             || (ok && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                         {
                             actions.push(Action::CreateFolder(target.clone()));
                             close = true;
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
                 Dialog::Release { path, revision, note } => {
@@ -2374,11 +2630,11 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let ok = !revision.trim().is_empty();
-                        if ui.add_enabled(ok, egui::Button::new(format!("Release {}", revision.trim()))).clicked() {
+                        if ui.add_enabled(ok, theme::primary(format!("Release {}", revision.trim()), t)).clicked() {
                             actions.push(Action::Release { path: path.clone(), revision: revision.clone(), note: note.clone() });
                             close = true;
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
                 Dialog::Properties { path, name, values, check_in, comment } => {
@@ -2407,7 +2663,7 @@ impl App {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        if ui.add(theme::primary("Save", t)).clicked() {
                             actions.push(Action::SaveProperties {
                                 path: path.clone(),
                                 name: name.clone(),
@@ -2417,7 +2673,7 @@ impl App {
                             });
                             close = true;
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
                 Dialog::Login { password, error } => {
@@ -2433,10 +2689,10 @@ impl App {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Log in").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if ui.add(theme::primary("Log in", t)).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             actions.push(Action::Relogin(std::mem::take(password)));
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
                 Dialog::Connect(form) => {
@@ -2465,14 +2721,14 @@ impl App {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             let ok = !form.url.trim().is_empty() && !form.user.trim().is_empty() && !form.password.is_empty();
-                            if ui.add_enabled(ok, egui::Button::new("Connect")).clicked() || (ok && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                            if ui.add_enabled(ok, theme::primary("Connect", t)).clicked() || (ok && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                                 actions.push(Action::ConnectServer);
                             }
-                            close |= ui.button("Cancel").clicked();
+                            close |= ui.add(theme::secondary("Cancel")).clicked();
                         });
                     } else {
                         ui.add_space(8.0);
-                        ui.label(RichText::new("Vault").strong());
+                        ui.label(RichText::new("Vault").font(theme::semibold(size::HEADING)));
                         let mut changed = false;
                         for v in &form.vaults {
                             let label = format!("{}  ({})", v.name, crate::app::access_label(v.access));
@@ -2497,10 +2753,10 @@ impl App {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             let ok = !form.vault.is_empty() && !form.folder.trim().is_empty();
-                            if ui.add_enabled(ok, egui::Button::new("Open the vault")).clicked() {
+                            if ui.add_enabled(ok, theme::primary("Open the vault", t)).clicked() {
                                 actions.push(Action::JoinVault);
                             }
-                            close |= ui.button("Cancel").clicked();
+                            close |= ui.add(theme::secondary("Cancel")).clicked();
                         });
                     }
                     if let Some(e) = &form.error {
@@ -2533,17 +2789,17 @@ impl App {
                             }
                             ui.horizontal(|ui| {
                                 let restart = if self.install_kind == update::Kind::Installer { "Install (the app restarts)" } else { "Install and restart" };
-                                if can_install && ui.button(restart).clicked() {
+                                if can_install && ui.add(theme::primary(restart, t)).clicked() {
                                     actions.push(Action::InstallUpdate);
                                 }
-                                if ui.button("Release page").clicked() {
+                                if ui.add(theme::secondary("Release page")).clicked() {
                                     ui.ctx().open_url(egui::OpenUrl::new_tab(&release.page));
                                 }
-                                if ui.button("Skip this version").clicked() {
+                                if ui.add(theme::secondary("Skip this version")).clicked() {
                                     actions.push(Action::SkipUpdate);
                                     close = true;
                                 }
-                                close |= ui.button("Later").clicked();
+                                close |= ui.add(theme::secondary("Later")).clicked();
                             });
                         }
                     }
@@ -2583,7 +2839,7 @@ impl App {
                         None => {}
                     });
                     ui.add_space(8.0);
-                    close |= ui.button("Close").clicked();
+                    close |= ui.add(theme::secondary("Close")).clicked();
                 }
                 Dialog::NewDesign { folder, name, part_number, description, open } => {
                     ui.heading("New design");
@@ -2625,7 +2881,7 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let ok = valid && !exists;
-                        if ui.add_enabled(ok, egui::Button::new("Create")).clicked()
+                        if ui.add_enabled(ok, theme::primary("Create", t)).clicked()
                             || (ok && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                         {
                             actions.push(Action::CreateDesign {
@@ -2636,13 +2892,13 @@ impl App {
                             });
                             close = true;
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
                 Dialog::Settings { open_command } => {
                     ui.heading("Settings");
                     ui.add_space(4.0);
-                    ui.label(RichText::new("Opening designs").strong());
+                    ui.label(RichText::new("Opening designs").font(theme::semibold(size::HEADING)));
                     match &self.detected {
                         Some(found) => {
                             ui.label(format!("SolidCraft found: {}", found.command[0]));
@@ -2673,7 +2929,7 @@ impl App {
                     );
                     ui.add_space(10.0);
                     if let Some(Backend::Local(vault)) = &self.backend {
-                        ui.label(RichText::new("Revisions in this vault").strong());
+                        ui.label(RichText::new("Revisions in this vault").font(theme::semibold(size::HEADING)));
                         let current = vault.revision_scheme().unwrap_or(vault::RevisionScheme::Letters);
                         ui.horizontal(|ui| {
                             for (scheme, label) in [
@@ -2690,7 +2946,7 @@ impl App {
                     }
                     #[cfg(not(windows))]
                     menu_entry_settings(ui, actions);
-                    ui.label(RichText::new("Updates").strong());
+                    ui.label(RichText::new("Updates").font(theme::semibold(size::HEADING)));
                     ui.horizontal_wrapped(|ui| {
                         let mut on = self.settings.check_updates;
                         let automatic = self.install_kind.checks();
@@ -2712,7 +2968,16 @@ impl App {
                             .weak(),
                     );
                     ui.add_space(10.0);
-                    ui.label(RichText::new("Interface size").strong());
+                    ui.label(RichText::new("Appearance").font(theme::semibold(size::HEADING)));
+                    ui.horizontal(|ui| {
+                        for (choice, label) in [(Appearance::System, "As the system"), (Appearance::Dark, "Dark"), (Appearance::Light, "Light")] {
+                            if ui.selectable_label(self.settings.appearance == choice, label).clicked() {
+                                actions.push(Action::SetAppearance(choice));
+                            }
+                        }
+                    });
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Interface size").font(theme::semibold(size::HEADING)));
                     ui.horizontal_wrapped(|ui| {
                         let current = ui.ctx().zoom_factor();
                         for zoom in ZOOM_PRESETS {
@@ -2725,11 +2990,11 @@ impl App {
                     ui.label(RichText::new("Also Ctrl + and Ctrl - anywhere, Ctrl 0 to reset.").small().weak());
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        if ui.add(theme::primary("Save", t)).clicked() {
                             actions.push(Action::SetOpenCommand(open_command.clone()));
                             close = true;
                         }
-                        close |= ui.button("Cancel").clicked();
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
             }
@@ -2765,21 +3030,33 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        theme::begin_frame(&ctx);
         let mut actions = Vec::new();
-        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui, &mut actions));
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        let t = theme::tokens(ui);
+        let bar = egui::Frame::new().fill(t.app_bar).inner_margin(egui::Margin::symmetric(12, 6));
+        egui::Panel::top("app-bar").frame(bar).show(ui, |ui| self.top_bar(ui, &mut actions));
+        let footer = egui::Frame::new().fill(t.footer).inner_margin(egui::Margin::symmetric(12, 5));
+        egui::Panel::bottom("status").frame(footer).show(ui, |ui| self.status_bar(ui));
         if self.backend.is_some() {
+            let strip = egui::Frame::new().fill(t.toolbar).inner_margin(egui::Margin::symmetric(12, 8));
+            egui::Panel::top("toolbar").frame(strip).show(ui, |ui| self.toolbar(ui, &mut actions));
+            let nav = egui::Frame::new().fill(t.footer).inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 8 });
             egui::Panel::left("folders")
-                .default_size(220.0)
-                .min_size(150.0)
+                .frame(nav)
+                .default_size(232.0)
+                .min_size(170.0)
                 .show(ui, |ui| self.left_panel(ui, &mut actions));
+            let side = egui::Frame::new().fill(t.panel).inner_margin(egui::Margin { left: 16, right: 12, top: 14, bottom: 8 });
             egui::Panel::right("details")
-                .default_size(360.0)
-                .min_size(280.0)
+                .frame(side)
+                .default_size(380.0)
+                .min_size(300.0)
                 .show(ui, |ui| self.details(ui, &mut actions));
-            egui::CentralPanel::default().show(ui, |ui| self.list(ui, &mut actions));
+            let body = egui::Frame::new().fill(t.panel).inner_margin(egui::Margin { left: 10, right: 10, top: 6, bottom: 0 });
+            egui::CentralPanel::default().frame(body).show(ui, |ui| self.list(ui, &mut actions));
         } else {
-            egui::CentralPanel::default().show(ui, |ui| self.welcome(ui, &mut actions));
+            let body = egui::Frame::new().fill(t.panel).inner_margin(egui::Margin::same(0));
+            egui::CentralPanel::default().frame(body).show(ui, |ui| self.welcome(ui, &mut actions));
         }
         self.dialogs(&ctx, &mut actions);
         drag_label(&ctx);
@@ -2794,12 +3071,10 @@ impl eframe::App for App {
 }
 
 fn properties(ui: &mut egui::Ui, entry: &Entry, info: Option<&scformat::DesignInfo>, latest: Option<&Version>) {
-    egui::Grid::new("properties").num_columns(2).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+    egui::Grid::new("properties").num_columns(2).spacing([16.0, 6.0]).min_col_width(96.0).show(ui, |ui| {
         let mut row = |label: &str, value: Option<String>| {
             if let Some(v) = value.filter(|v| !v.is_empty()) {
-                ui.weak(label);
-                ui.add(egui::Label::new(v).wrap());
-                ui.end_row();
+                theme::field_row(ui, label, &v);
             }
         };
         match info {
@@ -2849,12 +3124,18 @@ fn properties(ui: &mut egui::Ui, entry: &Entry, info: Option<&scformat::DesignIn
 /// Draws a thumbnail, or a placeholder of the same size.
 fn thumbnail(ui: &mut egui::Ui, image: Option<egui::Image<'static>>, size: egui::Vec2, sense: egui::Sense) -> egui::Response {
     match image {
-        Some(image) => ui.add(image.fit_to_exact_size(size).corner_radius(4.0).sense(sense)),
+        Some(image) => {
+            let response = ui.add(image.fit_to_exact_size(size).corner_radius(theme::RADIUS as f32).sense(sense));
+            let t = theme::tokens(ui);
+            ui.painter().rect_stroke(response.rect, theme::RADIUS as f32, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+            response
+        }
         None => {
             let (rect, response) = ui.allocate_exact_size(size, sense);
             let visuals = ui.visuals();
-            ui.painter().rect_filled(rect, 4.0, visuals.faint_bg_color);
-            ui.painter().rect_stroke(rect, 4.0, visuals.widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
+            let t = theme::tokens(ui);
+            ui.painter().rect_filled(rect, theme::RADIUS as f32, t.panel_header);
+            ui.painter().rect_stroke(rect, theme::RADIUS as f32, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
             let font = if size.y > 80.0 { egui::FontId::proportional(13.0) } else { egui::FontId::proportional(18.0) };
             let text = if size.y > 80.0 { "No saved preview" } else { "⬚" };
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, font, visuals.weak_text_color());
@@ -2883,7 +3164,7 @@ enum Sameness {
 #[cfg(not(windows))]
 fn menu_entry_settings(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
     let (Some(data), Some(program)) = (crate::menu_entry::data_home(), crate::menu_entry::program()) else { return };
-    ui.label(RichText::new("Application menu").strong());
+    ui.label(RichText::new("Application menu").font(theme::semibold(size::HEADING)));
     ui.horizontal_wrapped(|ui| match crate::menu_entry::installed(&data) {
         Some(p) if p == program => {
             ui.label("SolidCraft PDM is in the application menu.");
@@ -2911,21 +3192,34 @@ fn menu_entry_settings(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
     ui.add_space(10.0);
 }
 
-/// The State column: "In progress", "Released B" (changed since: orange), "Obsolete".
-fn state_text(e: &Entry) -> RichText {
+/// A table cell: text, a status (dot and text), or a pill.
+enum Cell {
+    Text(RichText),
+    Status(String, Color32),
+    Pill(String, Color32, Color32),
+}
+
+/// The State column: "In progress", "Released B" (a pill; changed since: orange), "Obsolete".
+fn state_cell(e: &Entry) -> Cell {
+    let t = theme::now();
     match (e.state, &e.release) {
-        (None, _) => RichText::new("-").weak(),
+        (None, _) => Cell::Text(RichText::new("-").weak()),
         (Some(vault::State::Released), release) => {
             let revision = release.as_ref().map_or("", |r| r.revision.as_str());
             if e.status == Status::Modified {
-                RichText::new(format!("Released {revision} · changed")).color(CHANGED)
+                Cell::Pill(format!("Released {revision} · changed"), t.warning, t.warning_bg)
             } else {
-                RichText::new(format!("Released {revision}")).color(ADDED)
+                Cell::Pill(format!("Released {revision}"), t.ok, t.ok_bg)
             }
         }
-        (Some(vault::State::Obsolete), _) => RichText::new("Obsolete").weak().strikethrough(),
-        (Some(vault::State::Wip), _) => RichText::new("In progress"),
+        (Some(vault::State::Obsolete), _) => Cell::Text(RichText::new("Obsolete").weak().strikethrough()),
+        (Some(vault::State::Wip), _) => Cell::Text(RichText::new("In progress").color(t.label)),
     }
+}
+
+/// The table header's hairline under a cell.
+fn ui_rule_under(response: &egui::Response, rect: egui::Rect, t: &theme::Tokens, clip: egui::Rect) {
+    response.ctx.layer_painter(response.layer_id).with_clip_rect(clip).hline(rect.x_range(), rect.bottom() + 2.0, egui::Stroke::new(1.0, t.rule));
 }
 
 /// The selected design's lifecycle and what can be done with it. `held`: on a server, who has
@@ -2938,45 +3232,55 @@ fn lifecycle_ui(ui: &mut egui::Ui, entry: &Entry, lifecycle: &vault::Lifecycle, 
         Some(user) => format!("Checked out by {user}"),
         None => "Check in the changes first".to_owned(),
     };
-    ui.horizontal_wrapped(|ui| {
-        match lifecycle.state {
-            vault::State::Wip => {
-                ui.label("In progress");
-                if let Some(r) = lifecycle.releases.first() {
-                    ui.weak(format!("· last released {}", r.revision));
+    let t = theme::tokens(ui);
+    let obsolete = lifecycle.state == vault::State::Obsolete;
+    {
+        ui.horizontal_wrapped(|ui| {
+            match lifecycle.state {
+                vault::State::Wip => {
+                    theme::pill(ui, "In progress", t.label, t.hover);
+                    if let Some(r) = lifecycle.releases.first() {
+                        ui.label(RichText::new(format!("last released {}", r.revision)).color(t.text_dim));
+                    }
                 }
-                if ui
-                    .add_enabled(current, egui::Button::new(format!("Release as {next}…")).small())
-                    .on_disabled_hover_text(&busy)
-                    .clicked()
-                {
-                    actions.push(Action::AskRelease(path.clone()));
+                vault::State::Released => {
+                    let r = lifecycle.releases.first();
+                    theme::pill(ui, &format!("Released {}", r.map_or("", |r| r.revision.as_str())), t.ok, t.ok_bg);
+                    if let Some(r) = r {
+                        ui.label(RichText::new(format!("v{} · {}", r.version, unix_time(r.released_at))).color(t.text_dim));
+                    }
                 }
-            }
-            vault::State::Released => {
-                let r = lifecycle.releases.first();
-                ui.label(RichText::new(format!("Released {}", r.map_or("", |r| r.revision.as_str()))).color(ADDED).strong());
-                if let Some(r) = r {
-                    ui.weak(format!("· v{} · {}", r.version, unix_time(r.released_at)));
-                }
-                if ui.add(egui::Button::new("Revise").small()).on_hover_text(format!("Work on revision {next}")).clicked() {
-                    actions.push(Action::Revise(path.clone()));
+                vault::State::Obsolete => {
+                    theme::pill(ui, "Obsolete", t.text_dim, t.panel_header);
                 }
             }
-            vault::State::Obsolete => {
-                ui.label(RichText::new("Obsolete").weak().strikethrough());
+            match lifecycle.state {
+                vault::State::Wip => {
+                    if ui
+                        .add_enabled(current, egui::Button::new(format!("Release as {next}…")))
+                        .on_disabled_hover_text(&busy)
+                        .clicked()
+                    {
+                        actions.push(Action::AskRelease(path.clone()));
+                    }
+                }
+                vault::State::Released => {
+                    if ui.add(egui::Button::new("Revise")).on_hover_text(format!("Work on revision {next}")).clicked() {
+                        actions.push(Action::Revise(path.clone()));
+                    }
+                }
+                vault::State::Obsolete => {}
             }
-        }
-        let obsolete = lifecycle.state == vault::State::Obsolete;
-        let (label, hint) = if obsolete {
-            ("Back to work in progress", "Use this design again")
-        } else {
-            ("Mark obsolete", "No longer used; kept with its history")
-        };
-        if ui.add(egui::Button::new(label).small()).on_hover_text(hint).clicked() {
-            actions.push(Action::SetObsolete { path: path.clone(), obsolete: !obsolete });
-        }
-    });
+            let (label, hint) = if obsolete {
+                ("Back to work in progress", "Use this design again")
+            } else {
+                ("Mark obsolete", "No longer used; kept with its history")
+            };
+            if ui.add(egui::Button::new(label)).on_hover_text(hint).clicked() {
+                actions.push(Action::SetObsolete { path: path.clone(), obsolete: !obsolete });
+            }
+        });
+    }
     if lifecycle.state == vault::State::Released && entry.status == Status::Modified {
         let revision = lifecycle.releases.first().map_or("", |r| r.revision.as_str());
         ui.colored_label(ui.visuals().warn_fg_color, format!("Changed since release {revision}: checking it in starts revision {next}."));
@@ -3012,9 +3316,15 @@ fn side_picker(ui: &mut egui::Ui, id: &str, side: &mut Side, history: &[Version]
     });
 }
 
-const ADDED: Color32 = Color32::from_rgb(80, 170, 100);
-const REMOVED: Color32 = Color32::from_rgb(215, 75, 75);
-const CHANGED: Color32 = Color32::from_rgb(225, 145, 40);
+fn added() -> Color32 {
+    theme::now().ok
+}
+fn removed() -> Color32 {
+    theme::now().error
+}
+fn changed() -> Color32 {
+    theme::now().warning
+}
 
 /// The differences, by section.
 fn comparison_ui(ui: &mut egui::Ui, c: &Comparison) {
@@ -3030,9 +3340,9 @@ fn comparison_ui(ui: &mut egui::Ui, c: &Comparison) {
             egui::Grid::new(("compare", title)).num_columns(4).spacing([12.0, 4.0]).max_col_width(280.0).striped(true).show(ui, |ui| {
                 for ch in list {
                     let (mark, color) = match (&ch.before, &ch.after) {
-                        (None, _) => ("+", ADDED),
-                        (_, None) => ("-", REMOVED),
-                        _ => ("~", CHANGED),
+                        (None, _) => ("+", added()),
+                        (_, None) => ("-", removed()),
+                        _ => ("~", changed()),
                     };
                     ui.colored_label(color, format!("{mark} {}", ch.what));
                     // Values wrap (the grid limits the column width): cut off, "boar…" says nothing.
@@ -3052,9 +3362,9 @@ fn comparison_ui(ui: &mut egui::Ui, c: &Comparison) {
             .show(ui, |ui| {
                 for f in &c.features {
                     let (mark, color, detail) = match &f.change {
-                        FeatureChangeKind::Added => ("+", ADDED, "added".to_owned()),
-                        FeatureChangeKind::Removed => ("-", REMOVED, "removed".to_owned()),
-                        edited => ("~", CHANGED, describe_edit(edited)),
+                        FeatureChangeKind::Added => ("+", added(), "added".to_owned()),
+                        FeatureChangeKind::Removed => ("-", removed(), "removed".to_owned()),
+                        edited => ("~", changed(), describe_edit(edited)),
                     };
                     ui.horizontal_wrapped(|ui| {
                         ui.colored_label(color, format!("{mark} {}", f.name));
@@ -3142,17 +3452,18 @@ fn image_server_buttons(ui: &mut egui::Ui, status: Option<&remote::RemoteStatus>
 /// The Status column for a workspace design.
 fn remote_style(status: &remote::RemoteStatus) -> (String, Color32) {
     use remote::RemoteStatus as R;
+    let t = theme::now();
     match status {
-        R::UpToDate => ("Up to date".into(), Color32::from_rgb(80, 170, 100)),
-        R::NewerOnServer => ("Newer on server".into(), Color32::from_rgb(120, 145, 185)),
-        R::NotDownloaded => ("On the server".into(), Color32::from_rgb(120, 145, 185)),
-        R::CheckedOut { modified: false } => ("Checked out".into(), Color32::from_rgb(90, 160, 220)),
-        R::CheckedOut { modified: true } => ("Checked out · changed".into(), Color32::from_rgb(225, 145, 40)),
-        R::CheckedOutByOther(user) => (format!("Checked out by {user}"), Color32::from_rgb(170, 130, 200)),
-        R::ChangedWithoutCheckout => ("Changed, not checked out".into(), Color32::from_rgb(225, 145, 40)),
-        R::Conflict => ("Conflict".into(), Color32::from_rgb(215, 75, 75)),
-        R::LocalOnly => ("Not on the server".into(), Color32::from_rgb(120, 145, 185)),
-        R::RemovedOnServer => ("Removed on the server".into(), Color32::from_rgb(215, 75, 75)),
+        R::UpToDate => ("Up to date".into(), t.ok),
+        R::NewerOnServer => ("Newer on server".into(), t.accent),
+        R::NotDownloaded => ("On the server".into(), t.text_dim),
+        R::CheckedOut { modified: false } => ("Checked out".into(), t.accent),
+        R::CheckedOut { modified: true } => ("Checked out · changed".into(), t.warning),
+        R::CheckedOutByOther(user) => (format!("Checked out by {user}"), t.other),
+        R::ChangedWithoutCheckout => ("Changed, not checked out".into(), t.warning),
+        R::Conflict => ("Conflict".into(), t.error),
+        R::LocalOnly => ("Not on the server".into(), t.accent),
+        R::RemovedOnServer => ("Removed on the server".into(), t.error),
     }
 }
 
@@ -3175,10 +3486,10 @@ fn dirs_home() -> Option<PathBuf> {
 
 fn status_style(status: Status) -> (&'static str, Color32) {
     match status {
-        Status::Current => ("Up to date", Color32::from_rgb(80, 170, 100)),
-        Status::Modified => ("Modified", Color32::from_rgb(225, 145, 40)),
-        Status::Untracked => ("Untracked", Color32::from_rgb(120, 145, 185)),
-        Status::Missing => ("Missing", Color32::from_rgb(215, 75, 75)),
+        Status::Current => ("Up to date", theme::now().ok),
+        Status::Modified => ("Modified", theme::now().warning),
+        Status::Untracked => ("Untracked", theme::now().accent),
+        Status::Missing => ("Missing", theme::now().error),
     }
 }
 
@@ -3232,17 +3543,89 @@ fn drag_label(ctx: &egui::Context) {
 }
 
 /// `text` in the strong text colour, with the chars at `matches` highlighted.
-fn highlighted(ui: &egui::Ui, text: &str, matches: &[usize]) -> egui::text::LayoutJob {
-    let font = egui::TextStyle::Body.resolve(ui.style());
+fn highlighted(ui: &egui::Ui, text: &str, matches: &[usize], font: egui::FontId) -> egui::text::LayoutJob {
+    let t = theme::tokens(ui);
     let normal = egui::TextFormat::simple(font.clone(), ui.visuals().strong_text_color());
-    let hit_color = ui.visuals().warn_fg_color;
-    let hit = egui::TextFormat { underline: egui::Stroke::new(1.0, hit_color), ..egui::TextFormat::simple(font, hit_color) };
+    let hit = egui::TextFormat { background: t.accent_soft, ..egui::TextFormat::simple(font, t.accent) };
     let mut job = egui::text::LayoutJob::default();
     for (i, c) in text.chars().enumerate() {
         let format = if matches.binary_search(&i).is_ok() { hit.clone() } else { normal.clone() };
         job.append(c.encode_utf8(&mut [0; 4]), 0.0, format);
     }
     job
+}
+
+/// A card on the start page: an icon tile, a title and a line; the whole card is the button.
+fn start_card(ui: &mut egui::Ui, icon: Icon, title: &str, text: &str) -> egui::Response {
+    let t = theme::tokens(ui);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 84.0), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title));
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    let fill = if hovered { t.selected_bg } else { t.card };
+    let stroke = if hovered { t.accent } else { t.card_border };
+    painter.rect(rect, egui::CornerRadius::same(theme::CARD_RADIUS), fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    let tile = egui::Rect::from_min_size(rect.left_top() + egui::vec2(16.0, (rect.height() - 44.0) / 2.0), egui::vec2(44.0, 44.0));
+    painter.rect_filled(tile, egui::CornerRadius::same(theme::RADIUS), t.panel_header);
+    icons::paint(ui, icon, tile.shrink(8.0), t.icon);
+    let x = tile.right() + 14.0;
+    let room = rect.right() - x - 12.0;
+    let title_galley = painter.layout(title.to_owned(), theme::semibold(size::SUBTITLE), if hovered { t.selected_ink } else { t.text }, room);
+    let text_galley = painter.layout(text.to_owned(), egui::FontId::proportional(size::BODY), t.text_dim, room);
+    let block = title_galley.size().y + 4.0 + text_galley.size().y;
+    let top = rect.center().y - block / 2.0;
+    painter.galley(egui::pos2(x, top), title_galley.clone(), t.text);
+    painter.galley(egui::pos2(x, top + title_galley.size().y + 4.0), text_galley, t.text_dim);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A recent vault: its icon, name and folder.
+fn recent_row(ui: &mut egui::Ui, path: &std::path::Path) -> egui::Response {
+    let t = theme::tokens(ui);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 46.0), egui::Sense::click());
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, path.display().to_string()));
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, egui::CornerRadius::same(theme::RADIUS), t.hover);
+    }
+    let workspace = remote::Workspace::is_workspace(path);
+    let icon = if workspace { Icon::Server } else { Icon::Folder };
+    icons::paint(ui, icon, egui::Rect::from_center_size(egui::pos2(rect.left() + 24.0, rect.center().y), egui::vec2(18.0, 18.0)), t.icon);
+    let name_galley = painter.layout_no_wrap(name, theme::medium(size::HEADING), t.text);
+    painter.galley(egui::pos2(rect.left() + 48.0, rect.center().y - name_galley.size().y / 2.0), name_galley, t.text);
+    let where_ = path.display().to_string();
+    let path_galley = painter.layout_no_wrap(where_, egui::FontId::monospace(size::SMALL + 0.5), t.text_dim);
+    painter.galley(egui::pos2(rect.left() + 260.0, rect.center().y - path_galley.size().y / 2.0), path_galley, t.text_dim);
+    let kind = if workspace { "Server vault" } else { "Vault" };
+    let kind_galley = painter.layout_no_wrap(kind.to_owned(), egui::FontId::proportional(size::SMALL + 0.5), t.text_dim);
+    painter.galley(egui::pos2(rect.right() - 16.0 - kind_galley.size().x, rect.center().y - kind_galley.size().y / 2.0), kind_galley, t.text_dim);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A thin vertical divider on the app bar.
+fn app_bar_divider(ui: &mut egui::Ui, t: &theme::Tokens) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(9.0, 18.0), egui::Sense::hover());
+    ui.painter().vline(rect.center().x, rect.y_range(), egui::Stroke::new(1.0, t.app_bar_dim.gamma_multiply(0.5)));
+}
+
+fn status_divider(ui: &mut egui::Ui, t: &theme::Tokens) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 12.0), egui::Sense::hover());
+    ui.painter().vline(rect.center().x, rect.y_range(), egui::Stroke::new(1.0, t.border));
+}
+
+/// A key or shortcut, as a small key cap.
+fn keycap(ui: &mut egui::Ui, keys: &str) {
+    let t = theme::tokens(ui);
+    let galley = ui.painter().layout_no_wrap(keys.to_owned(), egui::FontId::monospace(size::SMALL - 1.0), t.text_dim);
+    let (rect, _) = ui.allocate_exact_size(galley.size() + egui::vec2(10.0, 4.0), egui::Sense::hover());
+    ui.painter().rect(rect, egui::CornerRadius::same(4), t.footer, egui::Stroke::new(1.0, t.rule), egui::StrokeKind::Inside);
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, t.text_dim);
+}
+
+/// "server.lan" from "http://server.lan:7380/".
+fn host_of(url: &str) -> String {
+    url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_owned()
 }
 
 fn now_secs() -> i64 {

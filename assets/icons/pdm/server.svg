@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Server</title>
+  <path d="M13.5 10L50.5 10Q54 10 54 13.5L54 25.5Q54 29 50.5 29L13.5 29Q10 29 10 25.5L10 13.5Q10 10 13.5 10Z" fill="none" stroke="currentColor" stroke-width="5.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M13.5 35L50.5 35Q54 35 54 38.5L54 50.5Q54 54 50.5 54L13.5 54Q10 54 10 50.5L10 38.5Q10 35 13.5 35Z" fill="none" stroke="currentColor" stroke-width="5.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="20" cy="19.5" r="3.2" fill="currentColor"/>
+  <circle cx="20" cy="44.5" r="3.2" fill="currentColor"/>
+</svg>

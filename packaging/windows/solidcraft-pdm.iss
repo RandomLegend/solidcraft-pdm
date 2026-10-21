@@ -37,6 +37,8 @@ Source: "..\..\target\release\solidcraft-pdm.exe"; DestDir: "{app}"; Flags: igno
 Source: "..\..\target\release\scpdm.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\docs\windows.md"; DestDir: "{app}"; Flags: ignoreversion
+; The interface fonts (IBM Plex) are built into the program; their licence goes along.
+Source: "..\..\assets\fonts\OFL-IBM-Plex.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\SolidCraft PDM"; Filename: "{app}\solidcraft-pdm.exe"
