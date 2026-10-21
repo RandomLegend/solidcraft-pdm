@@ -10,13 +10,26 @@ use std::fs;
 use rusqlite::{OptionalExtension, params};
 
 use crate::store::write_atomic;
-use crate::{Error, Result, Vault, Version, check_path, store};
+use crate::{Error, Result, VERSION_SELECT, Vault, Version, check_path, store, version_from_row};
 
 /// Who has a design checked out, and since when (Unix seconds).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lock {
     pub user: String,
     pub since: i64,
+}
+
+/// A vault in numbers, for a server's overview.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stats {
+    pub designs: u64,
+    pub versions: u64,
+    pub releases: u64,
+    pub checked_out: u64,
+    /// The versions' bytes, each distinct content counted once (as stored).
+    pub stored_bytes: u64,
+    /// The newest version's time (Unix seconds).
+    pub last_change: Option<i64>,
 }
 
 /// Whether `hash` is a lowercase hex SHA-256 (and so a safe object name).
@@ -136,6 +149,32 @@ impl Vault {
         let hash = store::hash(bytes);
         self.store.put(&hash, bytes)?;
         Ok(hash)
+    }
+
+    pub fn stats(&self) -> Result<Stats> {
+        let count = |sql: &str| -> Result<u64> { Ok(self.db.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64) };
+        Ok(Stats {
+            designs: count("SELECT COUNT(*) FROM documents")?,
+            versions: count("SELECT COUNT(*) FROM versions")?,
+            releases: count("SELECT COUNT(*) FROM releases")?,
+            checked_out: count("SELECT COUNT(*) FROM locks")?,
+            stored_bytes: count("SELECT COALESCE(SUM(size), 0) FROM (SELECT DISTINCT hash, size FROM versions)")?,
+            last_change: self.db.query_row("SELECT MAX(created_at) FROM versions", [], |r| r.get(0))?,
+        })
+    }
+
+    /// The newest versions of any design, newest first.
+    pub fn recent_versions(&self, limit: usize) -> Result<Vec<Version>> {
+        let mut stmt = self.db.prepare(&format!("{VERSION_SELECT} ORDER BY created_at DESC, id DESC LIMIT ?1"))?;
+        let rows = stmt.query_map([limit as i64], version_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// How many versions were made per day (Unix day number, UTC) since `since`.
+    pub fn versions_per_day(&self, since: i64) -> Result<Vec<(i64, u64)>> {
+        let mut stmt = self.db.prepare("SELECT created_at / 86400, COUNT(*) FROM versions WHERE created_at >= ?1 GROUP BY 1 ORDER BY 1")?;
+        let rows = stmt.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The designs (besides `from` itself) whose links a move of `from` to `to` would update.

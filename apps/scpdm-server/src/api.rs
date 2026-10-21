@@ -32,12 +32,13 @@ pub fn router(server: Shared) -> Router {
         .route("/api/vaults/{vault}/file", get(file))
         .route("/api/vaults/{vault}/objects/{hash}", get(get_object).head(head_object).put(put_object))
         .route("/api/vaults/{vault}/{action}", post(action))
+        .merge(crate::admin::router())
         .layer(DefaultBodyLimit::max(protocol::MAX_UPLOAD_BYTES))
         .with_state(server)
 }
 
 /// An error response: status and [`ApiError`].
-struct Fail(StatusCode, ApiError);
+pub(crate) struct Fail(pub StatusCode, pub ApiError);
 
 impl IntoResponse for Fail {
     fn into_response(self) -> Response {
@@ -45,7 +46,7 @@ impl IntoResponse for Fail {
     }
 }
 
-fn fail(status: StatusCode, code: ErrorCode, message: impl Into<String>) -> Fail {
+pub(crate) fn fail(status: StatusCode, code: ErrorCode, message: impl Into<String>) -> Fail {
     Fail(status, ApiError::new(code, message))
 }
 
@@ -72,7 +73,7 @@ impl From<anyhow::Error> for Fail {
     }
 }
 
-type Reply<T> = Result<T, Fail>;
+pub(crate) type Reply<T> = Result<T, Fail>;
 
 /// The logged-in user (from `Authorization: Bearer <token>`).
 struct Auth(User, String);
@@ -107,7 +108,7 @@ fn vault_for(server: &Server, user: &User, name: &str, need: Access) -> Reply<Ar
 }
 
 /// Runs vault work on the blocking pool (SQLite and files), with the vault locked.
-async fn with_vault<T: Send + 'static>(shared: Arc<SharedVault>, work: impl FnOnce(&mut Vault, &SharedVault) -> Reply<T> + Send + 'static) -> Reply<T> {
+pub(crate) async fn with_vault<T: Send + 'static>(shared: Arc<SharedVault>, work: impl FnOnce(&mut Vault, &SharedVault) -> Reply<T> + Send + 'static) -> Reply<T> {
     tokio::task::spawn_blocking(move || {
         let mut vault = shared.vault.lock().unwrap_or_else(|e| e.into_inner());
         work(&mut vault, &shared)

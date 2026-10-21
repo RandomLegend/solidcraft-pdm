@@ -109,6 +109,27 @@ put a reverse proxy with TLS in front of it (for example Caddy:
 `caddy reverse-proxy --from pdm.example.com --to localhost:7380`). The app warns when a
 password would travel over `http://` to another machine.
 
+## The administration page
+
+A browser at the server's address (`http://server:7380`, or the HTTPS name) opens its
+administration page. Administrators log in there with their user name and password; other
+users cannot.
+
+- **Dashboard:** users (and who is online), vaults, designs, versions, what is checked out,
+  disk use; check-ins of the last 30 days; recent activity. A check-out can be broken there
+  (*Break*): for a design someone left checked out. Their changes stay in their workspace.
+- **Users:** add users; set a password (which ends their logins); make or remove
+  administrators; access per vault (no access, read, read and change, administer); log a user
+  out everywhere; remove a user. Not yourself: your own administrator rights and account stay.
+- **Vaults:** each vault's numbers, and new vaults.
+
+The command line (`scpdm-server user …`, `vault …`, `grant …`) still works alongside; the first
+administrator comes from there (`user add root --admin`).
+
+The page is built into the server (no files to install, nothing loaded from the internet). Its
+login is a cookie for this server only (`HttpOnly`, `SameSite=Strict`, `Secure` behind HTTPS);
+changes are only accepted from the page itself.
+
 ## In the app
 
 *Vault > Connect to a server…*: the address (`http://server:7380`), your user name and

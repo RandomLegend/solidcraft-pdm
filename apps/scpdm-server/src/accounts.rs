@@ -23,6 +23,21 @@ pub struct Accounts {
     db: Mutex<Connection>,
 }
 
+/// A user as the administration page lists them.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct UserInfo {
+    pub name: String,
+    pub admin: bool,
+    /// The last request with one of their logins (Unix seconds), and how many logins are open.
+    pub last_seen: Option<i64>,
+    pub sessions: u64,
+    /// Vault → "read", "write" or "admin".
+    pub access: std::collections::BTreeMap<String, String>,
+}
+
+/// How often a session's `last_seen` is written at most (seconds).
+const SEEN_EVERY: i64 = 60;
+
 /// User and vault names: letters, digits, `.`, `_`, `-` (vault names are folder names).
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -64,6 +79,11 @@ impl Accounts {
              );
              PRAGMA foreign_keys = ON;",
         )?;
+        let columns: Vec<String> =
+            db.prepare("SELECT name FROM pragma_table_info('sessions')")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        if !columns.iter().any(|c| c == "last_seen") {
+            db.execute_batch("ALTER TABLE sessions ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0;")?;
+        }
         Ok(Accounts { db: Mutex::new(db) })
     }
 
@@ -126,23 +146,69 @@ impl Accounts {
         let db = self.db();
         db.execute("DELETE FROM sessions WHERE expires_at < ?1", [now()])?;
         db.execute(
-            "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?1, ?2, ?3)",
-            params![token_hash(&token), id, now() + SESSION_SECONDS],
+            "INSERT INTO sessions (token_hash, user_id, expires_at, last_seen) VALUES (?1, ?2, ?3, ?4)",
+            params![token_hash(&token), id, now() + SESSION_SECONDS, now()],
         )?;
         Ok(Some(Session { token, user: name.to_owned(), admin }))
     }
 
-    /// The user of a valid session.
+    /// The user of a valid session (which counts as seen now).
     pub fn session(&self, token: &str) -> anyhow::Result<Option<User>> {
-        Ok(self
-            .db()
+        let db = self.db();
+        let hash = token_hash(token);
+        let user = db
             .query_row(
                 "SELECT u.id, u.name, u.admin FROM sessions s JOIN users u ON u.id = s.user_id
                  WHERE s.token_hash = ?1 AND s.expires_at >= ?2",
-                params![token_hash(token), now()],
+                params![hash, now()],
                 |r| Ok(User { id: r.get(0)?, name: r.get(1)?, admin: r.get(2)? }),
             )
-            .optional()?)
+            .optional()?;
+        if user.is_some() {
+            db.execute("UPDATE sessions SET last_seen = ?2 WHERE token_hash = ?1 AND last_seen < ?2 - ?3", params![hash, now(), SEEN_EVERY])?;
+        }
+        Ok(user)
+    }
+
+    /// Every user with their access, logins and when they were last seen.
+    pub fn user_infos(&self) -> anyhow::Result<Vec<UserInfo>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT u.name, u.admin, MAX(s.last_seen), COUNT(s.token_hash) FROM users u
+             LEFT JOIN sessions s ON s.user_id = u.id AND s.expires_at >= ?1
+             GROUP BY u.id ORDER BY u.name",
+        )?;
+        let mut users: Vec<UserInfo> = stmt
+            .query_map([now()], |r| {
+                Ok(UserInfo {
+                    name: r.get(0)?,
+                    admin: r.get(1)?,
+                    last_seen: r.get::<_, Option<i64>>(2)?.filter(|t| *t > 0),
+                    sessions: r.get::<_, i64>(3)? as u64,
+                    access: Default::default(),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut stmt = db.prepare("SELECT u.name, g.vault, g.access FROM grants g JOIN users u ON u.id = g.user_id")?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+            let (user, vault, access) = row?;
+            if let Some(u) = users.iter_mut().find(|u| u.name == user) {
+                u.access.insert(vault, access);
+            }
+        }
+        Ok(users)
+    }
+
+    pub fn set_admin(&self, name: &str, admin: bool) -> anyhow::Result<()> {
+        let n = self.db().execute("UPDATE users SET admin = ?2 WHERE name = ?1", params![name, admin])?;
+        anyhow::ensure!(n == 1, "no user {name}");
+        Ok(())
+    }
+
+    /// Ends every login of `name` (the app asks for the password again).
+    pub fn end_sessions(&self, name: &str) -> anyhow::Result<u64> {
+        let n = self.db().execute("DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE name = ?1)", [name])?;
+        Ok(n as u64)
     }
 
     pub fn logout(&self, token: &str) -> anyhow::Result<()> {

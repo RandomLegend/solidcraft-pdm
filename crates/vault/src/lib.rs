@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub use lifecycle::{Lifecycle, Release, RevisionScheme, State, next_revision};
-pub use shared::{Lock, is_hash};
+pub use shared::{Lock, Stats, is_hash};
 pub use store::hash;
 use store::{Store, write_atomic};
 

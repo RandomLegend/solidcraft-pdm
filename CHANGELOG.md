@@ -3,6 +3,14 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
+## Unreleased
+
+### Server
+
+- An administration page in the browser at the server's address: a dashboard (users online,
+  vaults, designs, versions, check-outs, disk use, check-ins per day, recent activity),
+  managing users and their access to vaults, adding vaults, breaking a check-out.
+
 ## 0.2.0 — 2026-10-21
 
 Shared vaults for a small team, with an optional server, and updates for the app.

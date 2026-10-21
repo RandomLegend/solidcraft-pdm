@@ -8,9 +8,10 @@
 //!                      latest versions; people work in workspaces of their own (`crates/remote`)
 //! ```
 //!
-//! The API is described in `crates/protocol`.
+//! The API is described in `crates/protocol`; the administration page is in `admin`.
 
 pub mod accounts;
+mod admin;
 mod api;
 
 use std::collections::HashMap;
@@ -27,6 +28,8 @@ pub struct Server {
     data: PathBuf,
     pub accounts: Accounts,
     vaults: Mutex<HashMap<String, Arc<SharedVault>>>,
+    /// When it started (Unix seconds), for the administration page.
+    started: i64,
 }
 
 /// A vault in use: one change at a time; the counter tells clients whether to fetch it again.
@@ -45,6 +48,7 @@ impl Server {
             data: data.to_path_buf(),
             accounts: Accounts::open(data)?,
             vaults: Mutex::new(HashMap::new()),
+            started: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64),
         }))
     }
 

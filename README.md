@@ -46,7 +46,8 @@ optional [server](docs/server.md).
   AppImage; *+ New design* starts one. The interface scales up to 250 % for large screens.
 - **Optional team server.** Share vaults with a small team: everyone works in a folder of their
   own, checks designs out (one person at a time) and checks them in; moves, releases and
-  properties are changed on the server. See [docs/server.md](docs/server.md).
+  properties are changed on the server, which has an administration page in the browser for
+  users, access and a dashboard. See [docs/server.md](docs/server.md).
 
 More in the [guide](docs/guide.md).
 
