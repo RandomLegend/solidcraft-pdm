@@ -120,3 +120,16 @@ fn refuses_unknown_containers() {
     .unwrap_err();
     assert!(matches!(err, Error::UnsupportedContainer(_)), "{err}");
 }
+
+#[test]
+fn new_designs_read_back() {
+    let bytes = scformat::new_design("bracket", &[("part_number", " BR-001 "), ("description", "")]);
+    let info = scformat::read(Cursor::new(bytes)).unwrap();
+    assert_eq!(info.encoding, Encoding::Json);
+    assert_eq!(info.format_version(), Some(1));
+    assert_eq!(info.name.as_deref(), Some("bracket"));
+    assert_eq!(info.units.as_deref(), Some("mm"));
+    assert_eq!(info.metadata.part_number.as_deref(), Some("BR-001"));
+    assert_eq!(info.metadata.description, None, "empty values are left out");
+    assert_eq!(info.feature_count, 0);
+}

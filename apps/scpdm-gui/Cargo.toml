@@ -20,6 +20,7 @@ eframe = { workspace = true }
 egui_extras = { workspace = true }
 image = { workspace = true }
 rfd = { workspace = true }
+nucleo-matcher = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }

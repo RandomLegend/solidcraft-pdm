@@ -162,3 +162,43 @@ fn stored_objects_are_verified() {
     fs::write(&object, "tampered").unwrap();
     assert!(matches!(vault.version_bytes(&v), Err(Error::Corrupt(_))));
 }
+
+#[test]
+fn folders_can_be_created_listed_and_removed() {
+    let (dir, mut vault) = setup();
+    vault.create_folder("archive/2026").unwrap();
+    assert!(dir.path().join("archive/2026").is_dir());
+    assert_eq!(vault.folders().unwrap(), ["archive", "archive/2026", "enclosure"]);
+    assert!(matches!(vault.create_folder("archive"), Err(Error::Exists(_))));
+
+    let moved = vault.move_to_folder(CASE, "archive/2026").unwrap();
+    assert_eq!(moved, "archive/2026/case.solidcraft");
+    assert!(matches!(vault.remove_folder("archive/2026"), Err(Error::FolderNotEmpty(_))));
+    assert_eq!(vault.move_to_folder(&moved, "").unwrap(), "case.solidcraft");
+    vault.remove_folder("archive/2026").unwrap();
+    assert_eq!(vault.folders().unwrap(), ["archive", "enclosure"]);
+}
+
+#[test]
+fn paths_cannot_leave_the_vault_or_hide() {
+    let (_dir, mut vault) = setup();
+    for bad in ["../outside.solidcraft", "a/../../x.solidcraft", ".pdm/x.solidcraft", "/abs.solidcraft", "a//b.solidcraft", ""] {
+        assert!(matches!(vault.rename(CASE, bad), Err(Error::InvalidPath(_))), "{bad}");
+    }
+    for bad in ["..", ".hidden", "a/./b"] {
+        assert!(matches!(vault.create_folder(bad), Err(Error::InvalidPath(_))), "{bad}");
+    }
+    // Nothing was moved.
+    assert_eq!(vault.scan().unwrap()[0].path, CASE);
+}
+
+#[test]
+fn new_designs_are_added_as_v1_and_never_overwrite() {
+    let (dir, mut vault) = setup();
+    let v = vault.add_new("drafts/bracket.solidcraft", &design("BR-1", 0).into_bytes(), "New design").unwrap();
+    assert_eq!((v.number, v.part_number.as_deref()), (1, Some("BR-1")));
+    assert!(dir.path().join("drafts/bracket.solidcraft").is_file());
+    assert!(matches!(vault.add_new(CASE, b"{}", ""), Err(Error::Exists(_))));
+    assert_eq!(fs::read_to_string(dir.path().join(CASE)).unwrap(), design("P-1", 1), "untouched");
+    assert!(matches!(vault.add_new("../x.solidcraft", b"{}", ""), Err(Error::InvalidPath(_))));
+}

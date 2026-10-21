@@ -2,7 +2,7 @@
 //! properties, links and history on the right.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime};
@@ -13,32 +13,111 @@ use egui_extras::{Column, TableBuilder};
 use serde::{Deserialize, Serialize};
 use vault::{Entry, Status, Vault, Version};
 
+use crate::launcher::{self, Launcher};
 use crate::scan::{self, Info, Scan};
+use crate::search::{Haystack, Search};
 
 /// How often the vault is rescanned while the window has focus (cheap: unchanged files are
 /// recognised by size and modification time).
 const RESCAN_EVERY: Duration = Duration::from_secs(3);
 /// SolidCraft's portable thumbnail size.
 const THUMB: egui::Vec2 = egui::vec2(240.0, 150.0);
-const ROW_THUMB: egui::Vec2 = egui::vec2(64.0, 40.0);
+/// Width/height of SolidCraft's thumbnails.
+const THUMB_ASPECT: f32 = 1.6;
+const ROW_THUMB_WIDTHS: std::ops::RangeInclusive<f32> = 48.0..=240.0;
 const HISTORY_THUMB: egui::Vec2 = egui::vec2(80.0, 50.0);
 const MAX_RECENT: usize = 8;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
     last_vault: Option<PathBuf>,
     recent: Vec<PathBuf>,
-    /// Program and arguments that open a design (the file is appended); empty for automatic.
+    /// Program (and arguments) that opens a design; empty: SolidCraft as installed.
     open_command: String,
+    /// Width of the thumbnails in the list.
+    thumb_width: f32,
+    /// List columns the user switched off.
+    hidden_columns: Vec<ListColumn>,
+    /// Interface size (egui zoom factor; Ctrl + and Ctrl - change it too).
+    zoom: f32,
 }
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            last_vault: None,
+            recent: Vec::new(),
+            open_command: String::new(),
+            thumb_width: 160.0,
+            hidden_columns: Vec::new(),
+            zoom: 1.0,
+        }
+    }
+}
+
+/// The list's optional columns (the thumbnail and the design are always shown).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+enum ListColumn {
+    Status,
+    Version,
+    PartNumber,
+    Revision,
+    Modified,
+}
+
+impl ListColumn {
+    const ALL: [ListColumn; 5] =
+        [ListColumn::Status, ListColumn::Version, ListColumn::PartNumber, ListColumn::Revision, ListColumn::Modified];
+
+    fn title(self) -> &'static str {
+        match self {
+            ListColumn::Status => "Status",
+            ListColumn::Version => "Ver",
+            ListColumn::PartNumber => "Part number",
+            ListColumn::Revision => "Rev",
+            ListColumn::Modified => "Modified",
+        }
+    }
+
+    fn menu_label(self) -> &'static str {
+        match self {
+            ListColumn::Version => "Version",
+            ListColumn::Revision => "Revision",
+            c => c.title(),
+        }
+    }
+
+    fn width(self) -> f32 {
+        match self {
+            ListColumn::Status => 96.0,
+            ListColumn::Version => 40.0,
+            ListColumn::PartNumber => 110.0,
+            ListColumn::Revision => 40.0,
+            ListColumn::Modified => 118.0,
+        }
+    }
+}
+
+const ZOOM_PRESETS: [f32; 6] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5];
 
 #[derive(Clone, PartialEq)]
 enum View {
     All,
     Status(Status),
+    /// Designs directly in the vault folder.
+    TopLevel,
     /// Everything below this folder.
     Folder(String),
+}
+
+/// A design being dragged onto a folder.
+struct DraggedDesign(String);
+
+/// A row of the list: an index into `entries`, and the file name's letters that matched the search.
+struct Row {
+    index: usize,
+    matches: Vec<usize>,
 }
 
 enum Dialog {
@@ -47,6 +126,8 @@ enum Dialog {
     CheckInAll { comment: String, untracked: bool },
     MakeVault { dir: PathBuf },
     Settings { open_command: String },
+    NewFolder { parent: String, name: String },
+    NewDesign { folder: String, name: String, part_number: String, description: String, open: bool },
 }
 
 /// What the user asked for while the frame was drawn; applied after drawing.
@@ -67,6 +148,16 @@ enum Action {
     MakeVault(PathBuf),
     Refresh,
     SetOpenCommand(String),
+    AskNewFolder(String),
+    CreateFolder(String),
+    DeleteFolder(String),
+    ShowFolder(String),
+    MoveToFolder { path: String, folder: String },
+    ToggleColumn(ListColumn),
+    /// Opens a version: the working file when it has that content, else a read-only copy.
+    OpenVersion { path: String, version: Version },
+    AskNewDesign(String),
+    CreateDesign { path: String, part_number: String, description: String, open: bool },
 }
 
 pub struct App {
@@ -77,11 +168,19 @@ pub struct App {
     infos: HashMap<String, Info>,
     /// Thumbnail PNGs by key (content hash for working files, object hash for versions).
     thumbs: HashMap<String, Option<Arc<[u8]>>>,
+    /// Every folder of the vault, also empty ones.
+    folders: Vec<String>,
     scan: Option<Receiver<Result<Scan, String>>>,
     rescan: bool,
     last_scan: Instant,
     view: View,
     search: String,
+    focus_search: bool,
+    /// The list as shown, and what it was computed for (`None`: recompute).
+    rows: Vec<Row>,
+    rows_for: Option<(String, View)>,
+    /// SolidCraft as installed (desktop entry or PATH).
+    detected: Option<Launcher>,
     selected: Option<String>,
     history: Vec<Version>,
     comment: String,
@@ -94,17 +193,23 @@ impl App {
     pub fn new(cc: &eframe::CreationContext, start: Option<PathBuf>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let settings: Settings = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
+        cc.egui_ctx.set_zoom_factor(settings.zoom.clamp(0.5, 3.0));
         let mut app = App {
             settings,
             vault: None,
             entries: Vec::new(),
             infos: HashMap::new(),
             thumbs: HashMap::new(),
+            folders: Vec::new(),
             scan: None,
             rescan: false,
             last_scan: Instant::now(),
             view: View::All,
             search: String::new(),
+            focus_search: false,
+            rows: Vec::new(),
+            rows_for: None,
+            detected: launcher::detect(),
             selected: None,
             history: Vec::new(),
             comment: String::new(),
@@ -133,6 +238,11 @@ impl App {
         }
     }
 
+    /// The program that opens designs (as in Settings; empty: SolidCraft as installed).
+    pub fn set_open_command(&mut self, command: &str) {
+        self.settings.open_command = command.trim().to_owned();
+    }
+
     /// Whether a background scan is running.
     pub fn is_scanning(&self) -> bool {
         self.scan.is_some()
@@ -156,6 +266,8 @@ impl App {
                 self.entries.clear();
                 self.infos.clear();
                 self.thumbs.clear();
+                self.folders.clear();
+                self.rows_for = None;
                 self.scan = None;
                 self.view = View::All;
                 self.selected = None;
@@ -193,6 +305,8 @@ impl App {
                 let live: HashSet<&str> = scan.entries.iter().filter_map(|e| e.hash.as_deref()).collect();
                 self.infos.retain(|h, _| live.contains(h.as_str()));
                 self.entries = scan.entries;
+                self.folders = scan.folders;
+                self.rows_for = None;
                 if self.selected.as_ref().is_some_and(|s| !self.entries.iter().any(|e| &e.path == s)) {
                     self.selected = None;
                 }
@@ -242,35 +356,63 @@ impl App {
         Some(egui::Image::from_bytes(format!("bytes://{key}.png"), egui::load::Bytes::Shared(png)))
     }
 
-    fn visible(&self) -> Vec<usize> {
-        let needle = self.search.to_lowercase();
-        (0..self.entries.len())
-            .filter(|&i| {
-                let e = &self.entries[i];
-                let in_view = match &self.view {
-                    View::All => true,
-                    View::Status(s) => e.status == *s,
-                    View::Folder(f) => e.path.starts_with(&format!("{f}/")),
-                };
-                in_view && (needle.is_empty() || self.searchable(e).to_lowercase().contains(&needle))
-            })
-            .collect()
+    /// Recomputes the list when the search, the view or the vault changed. A search looks in
+    /// the whole vault, best matches first; otherwise the view's designs are listed by path.
+    fn refilter(&mut self) {
+        let key = (self.search.clone(), self.view.clone());
+        if self.rows_for.as_ref() == Some(&key) {
+            return;
+        }
+        self.rows = match Search::new(&self.search) {
+            Some(mut search) => {
+                let mut hits: Vec<(u32, Row)> = (0..self.entries.len())
+                    .filter_map(|index| {
+                        let e = &self.entries[index];
+                        let (folder, file_name) = e.path.rsplit_once('/').unwrap_or(("", &e.path));
+                        let info = self.info(e);
+                        let latest = e.latest.as_ref();
+                        let mut fields = vec![folder];
+                        match info {
+                            Some(i) => {
+                                let m = &i.metadata;
+                                fields.extend(
+                                    [&i.name, &m.part_number, &m.description, &m.project, &m.revision]
+                                        .into_iter()
+                                        .flatten()
+                                        .map(String::as_str),
+                                );
+                            }
+                            None => fields.extend(
+                                [latest.and_then(|v| v.name.as_deref()), latest.and_then(|v| v.part_number.as_deref())]
+                                    .into_iter()
+                                    .flatten(),
+                            ),
+                        }
+                        let hit = search.score(&Haystack { file_name, fields })?;
+                        Some((hit.score, Row { index, matches: hit.file_name_matches }))
+                    })
+                    .collect();
+                hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| self.entries[a.1.index].path.cmp(&self.entries[b.1.index].path)));
+                hits.into_iter().map(|(_, row)| row).collect()
+            }
+            None => (0..self.entries.len())
+                .filter(|&i| {
+                    let e = &self.entries[i];
+                    match &self.view {
+                        View::All => true,
+                        View::Status(s) => e.status == *s,
+                        View::TopLevel => !e.path.contains('/'),
+                        View::Folder(f) => e.path.starts_with(&format!("{f}/")),
+                    }
+                })
+                .map(|index| Row { index, matches: Vec::new() })
+                .collect(),
+        };
+        self.rows_for = Some(key);
     }
 
-    fn searchable(&self, e: &Entry) -> String {
-        let mut s = e.path.clone();
-        if let Some(i) = self.info(e) {
-            for v in [&i.name, &i.metadata.part_number, &i.metadata.description, &i.metadata.project].into_iter().flatten() {
-                s.push('\n');
-                s.push_str(v);
-            }
-        } else if let Some(v) = &e.latest {
-            for v in [&v.name, &v.part_number].into_iter().flatten() {
-                s.push('\n');
-                s.push_str(v);
-            }
-        }
-        s
+    fn launcher(&self) -> Option<Launcher> {
+        launcher::custom(&self.settings.open_command).or_else(|| self.detected.clone())
     }
 
     fn count(&self, status: Status) -> usize {
@@ -291,11 +433,10 @@ impl App {
         match action {
             Action::Select(path) => self.select(&path),
             Action::Open(path) => self.open_design(&path),
-            Action::ShowInFolder(path) => {
+            Action::ShowInFolder(path) | Action::ShowFolder(path) => {
                 let Some(vault) = &self.vault else { return };
-                let dir = vault.absolute(&path).parent().map(Path::to_path_buf).unwrap_or_default();
-                if let Err(e) = std::process::Command::new("xdg-open").arg(dir).spawn() {
-                    self.error(format!("Could not open the folder: {e}"));
+                if let Err(e) = launcher::show_in_folder(&vault.absolute(&path)) {
+                    self.error(format!("Could not open the file manager: {e}"));
                 }
             }
             Action::CheckIn { path, comment } => {
@@ -407,21 +548,151 @@ impl App {
                 Err(e) => self.error(e),
             },
             Action::Refresh => self.start_scan(ctx),
-            Action::SetOpenCommand(cmd) => self.settings.open_command = cmd.trim().to_owned(),
+            Action::SetOpenCommand(cmd) => {
+                self.settings.open_command = cmd.trim().to_owned();
+                self.detected = launcher::detect();
+            }
+            Action::AskNewFolder(parent) => self.dialog = Some(Dialog::NewFolder { parent, name: String::new() }),
+            Action::CreateFolder(folder) => {
+                let Some(vault) = &self.vault else { return };
+                match vault.create_folder(&folder) {
+                    Ok(()) => {
+                        self.info_msg(format!("Created folder {folder}"));
+                        self.folders.push(folder.clone());
+                        self.folders.sort();
+                        self.view = View::Folder(folder);
+                        self.start_scan(ctx);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Action::DeleteFolder(folder) => {
+                let Some(vault) = &self.vault else { return };
+                match vault.remove_folder(&folder) {
+                    Ok(()) => {
+                        self.info_msg(format!("Deleted folder {folder}"));
+                        self.folders.retain(|f| *f != folder);
+                        if matches!(&self.view, View::Folder(f) if *f == folder || f.starts_with(&format!("{folder}/"))) {
+                            self.view = View::All;
+                        }
+                        self.start_scan(ctx);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Action::ToggleColumn(column) => {
+                let hidden = &mut self.settings.hidden_columns;
+                if let Some(i) = hidden.iter().position(|c| *c == column) {
+                    hidden.remove(i);
+                } else {
+                    hidden.push(column);
+                }
+            }
+            Action::OpenVersion { path, version } => {
+                if self.entry(&path).and_then(|e| e.hash.as_deref()) == Some(version.hash.as_str()) {
+                    self.open_design(&path);
+                } else {
+                    self.open_version_copy(&path, &version);
+                }
+            }
+            Action::AskNewDesign(folder) => {
+                self.dialog = Some(Dialog::NewDesign {
+                    folder,
+                    name: String::new(),
+                    part_number: String::new(),
+                    description: String::new(),
+                    open: true,
+                });
+            }
+            Action::CreateDesign { path, part_number, description, open } => {
+                let Some(vault) = &mut self.vault else { return };
+                let (folder, file) = path.rsplit_once('/').unwrap_or(("", &path));
+                let name = file.strip_suffix(".solidcraft").unwrap_or(file);
+                let bytes = scformat::new_design(name, &[("part_number", &part_number), ("description", &description)]);
+                match vault.add_new(&path, &bytes, "New design") {
+                    Ok(_) => {
+                        self.info_msg(format!("Created {path} (v1)"));
+                        self.view = if folder.is_empty() { View::TopLevel } else { View::Folder(folder.to_owned()) };
+                        self.search.clear();
+                        self.select(&path);
+                        self.start_scan(ctx);
+                        if open {
+                            self.open_design(&path);
+                        }
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Action::MoveToFolder { path, folder } => {
+                let users = self.used_in(&path).len();
+                let Some(vault) = &mut self.vault else { return };
+                match vault.move_to_folder(&path, &folder) {
+                    Ok(to) if to == path => {}
+                    Ok(to) => {
+                        let place = if folder.is_empty() { "the top level".to_owned() } else { folder };
+                        let mut msg = format!("Moved {path} to {place}");
+                        if users > 0 {
+                            msg.push_str(&format!(" ({users} designs link to it by path; reopen and relink them in SolidCraft)"));
+                        }
+                        self.info_msg(msg);
+                        if self.selected.as_deref() == Some(path.as_str()) {
+                            self.selected = Some(to);
+                        }
+                        self.load_history();
+                        self.start_scan(ctx);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
         }
     }
 
     fn open_design(&mut self, path: &str) {
         let Some(vault) = &self.vault else { return };
         let file = vault.absolute(path);
-        let command: Vec<String> = if self.settings.open_command.is_empty() {
-            vec![if on_path("solidcraft") { "solidcraft" } else { "xdg-open" }.to_owned()]
-        } else {
-            self.settings.open_command.split_whitespace().map(str::to_owned).collect()
+        let Some(launcher) = self.launcher() else {
+            self.error("SolidCraft was not found. Choose its AppImage in Settings.");
+            self.dialog = Some(Dialog::Settings { open_command: self.settings.open_command.clone() });
+            return;
         };
-        let Some((program, args)) = command.split_first() else { return };
-        if let Err(e) = std::process::Command::new(program).args(args).arg(&file).spawn() {
-            self.error(format!("Could not run {program}: {e} (set the program in Vault > Settings)"));
+        if let Err(e) = launcher.open(&file) {
+            self.error(format!("Could not start {}: {e} (change it in Vault > Settings)", launcher.command[0]));
+        }
+    }
+
+    /// Opens an earlier version in SolidCraft as a copy in a read-only folder, so that
+    /// SolidCraft cannot save over it; the working file and the vault stay as they are.
+    fn open_version_copy(&mut self, path: &str, version: &Version) {
+        let Some(vault) = &self.vault else { return };
+        let file = path.rsplit_once('/').map_or(path, |(_, f)| f);
+        let (stem, ext) = file.rsplit_once('.').unwrap_or((file, "solidcraft"));
+        let dir = std::env::temp_dir().join("solidcraft-pdm").join(&version.hash[..16]);
+        let copy = dir.join(format!("{stem} (v{}, read-only).{ext}", version.number));
+        let result = (|| -> Result<(), String> {
+            if !copy.is_file() {
+                let bytes = vault.version_bytes(version).map_err(|e| e.to_string())?;
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                std::fs::write(&copy, bytes).map_err(|e| e.to_string())?;
+                for p in [&copy, &dir] {
+                    let mut perms = std::fs::metadata(p).map_err(|e| e.to_string())?.permissions();
+                    perms.set_readonly(true);
+                    std::fs::set_permissions(p, perms).map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Err(e) => self.error(format!("Could not prepare v{}: {e}", version.number)),
+            Ok(()) => match self.launcher() {
+                Some(launcher) => match launcher.open(&copy) {
+                    Ok(()) => self.info_msg(format!(
+                        "Opened a read-only copy of v{} (to work on it, Restore it first)",
+                        version.number
+                    )),
+                    Err(e) => self.error(format!("Could not start {}: {e}", launcher.command[0])),
+                },
+                None => self.error("SolidCraft was not found. Choose its AppImage in Settings."),
+            },
         }
     }
 
@@ -448,16 +719,34 @@ impl App {
                 });
                 ui.separator();
                 if ui.button("Settings…").clicked() {
+                    self.detected = launcher::detect();
                     self.dialog = Some(Dialog::Settings { open_command: self.settings.open_command.clone() });
                 }
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
+            // Stays open while columns are ticked.
+            let keep_open = egui::containers::menu::MenuConfig::new()
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+            egui::containers::menu::MenuButton::new("View").config(keep_open).ui(ui, |ui| {
+                ui.label(RichText::new("Columns").small().weak());
+                column_toggles(ui, &self.settings.hidden_columns, actions);
+                ui.separator();
+                ui.label(RichText::new(format!("Interface size: {:.0} %", ui.ctx().zoom_factor() * 100.0)).small().weak());
+                egui::gui_zoom::zoom_menu_buttons(ui);
+            });
             if self.vault.is_none() {
                 return;
             }
             ui.separator();
+            let folder = match &self.view {
+                View::Folder(f) => f.clone(),
+                _ => String::new(),
+            };
+            if ui.button("+ New design").on_hover_text("Create an empty design and open it in SolidCraft").clicked() {
+                actions.push(Action::AskNewDesign(folder));
+            }
             if ui.button("⟳ Refresh").on_hover_text("Rescan the vault (F5)").clicked() {
                 actions.push(Action::Refresh);
             }
@@ -469,12 +758,9 @@ impl App {
             {
                 self.dialog = Some(Dialog::CheckInAll { comment: String::new(), untracked: true });
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search name, part no…").desired_width(220.0));
-                if self.scan.is_some() {
-                    ui.spinner();
-                }
-            });
+            if self.scan.is_some() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.spinner());
+            }
         });
     }
 
@@ -502,7 +788,7 @@ impl App {
         });
     }
 
-    fn left_panel(&mut self, ui: &mut egui::Ui) {
+    fn left_panel(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
             let total = self.entries.len();
@@ -516,141 +802,301 @@ impl App {
                     ui.selectable_value(&mut view, View::Status(status), text);
                 }
             }
+
             ui.add_space(8.0);
-            ui.label(RichText::new("Folders").strong());
-            let folders = vault::design_folders(&self.entries);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Folders").strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let parent = match &view {
+                        View::Folder(f) => f.clone(),
+                        _ => String::new(),
+                    };
+                    let hint = if parent.is_empty() {
+                        "New folder in the vault".to_owned()
+                    } else {
+                        format!("New folder in {parent}")
+                    };
+                    if ui.small_button("+ New folder").on_hover_text(hint).clicked() {
+                        actions.push(Action::AskNewFolder(parent));
+                    }
+                });
+            });
+            let top = self.entries.iter().filter(|e| !e.path.contains('/')).count();
+            let response = ui.selectable_value(&mut view, View::TopLevel, format!("Top level  ({top})"));
+            drop_target(ui, &response, "", actions);
+            response.context_menu(|ui| {
+                if ui.button("New design here…").clicked() {
+                    actions.push(Action::AskNewDesign(String::new()));
+                    ui.close();
+                }
+                if ui.button("New folder…").clicked() {
+                    actions.push(Action::AskNewFolder(String::new()));
+                    ui.close();
+                }
+            });
             let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-            for f in &folders {
+            for f in &self.folders {
                 children.entry(f.rsplit_once('/').map_or("", |(p, _)| p)).or_default().push(f);
             }
-            if folders.is_empty() {
-                ui.weak("No subfolders");
+            self.folder_tree(ui, "", &children, &mut view, actions);
+            ui.add_space(6.0);
+            ui.label(RichText::new("Drag designs onto a folder to move them.").small().weak());
+            if view != self.view {
+                self.view = view;
+                self.search.clear();
             }
-            self.folder_tree(ui, "", &children, &mut view);
-            self.view = view;
         });
     }
 
-    fn folder_tree(&self, ui: &mut egui::Ui, parent: &str, children: &BTreeMap<&str, Vec<&str>>, view: &mut View) {
+    fn folder_tree(
+        &self,
+        ui: &mut egui::Ui,
+        parent: &str,
+        children: &BTreeMap<&str, Vec<&str>>,
+        view: &mut View,
+        actions: &mut Vec<Action>,
+    ) {
         for &folder in children.get(parent).map(Vec::as_slice).unwrap_or_default() {
-            let name = folder.rsplit_once('/').map_or(folder, |(_, n)| n);
-            let prefix = format!("{folder}/");
-            let n = self.entries.iter().filter(|e| e.path.starts_with(&prefix)).count();
-            let this = View::Folder(folder.to_owned());
-            let label = format!("{name}  ({n})");
             if children.contains_key(folder) {
                 let id = ui.make_persistent_id(("folder", folder));
                 egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-                    .show_header(ui, |ui| ui.selectable_value(view, this, label))
-                    .body(|ui| self.folder_tree(ui, folder, children, view));
+                    .show_header(ui, |ui| self.folder_item(ui, folder, children, view, actions))
+                    .body(|ui| self.folder_tree(ui, folder, children, view, actions));
             } else {
                 ui.horizontal(|ui| {
                     ui.add_space(ui.spacing().indent);
-                    ui.selectable_value(view, this, label);
+                    self.folder_item(ui, folder, children, view, actions);
                 });
             }
         }
     }
 
-    fn table(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let visible = self.visible();
-        if visible.is_empty() {
+    /// A folder in the tree: selects it, takes dropped designs, and has a context menu.
+    fn folder_item(
+        &self,
+        ui: &mut egui::Ui,
+        folder: &str,
+        children: &BTreeMap<&str, Vec<&str>>,
+        view: &mut View,
+        actions: &mut Vec<Action>,
+    ) {
+        let name = folder.rsplit_once('/').map_or(folder, |(_, n)| n);
+        let prefix = format!("{folder}/");
+        let n = self.entries.iter().filter(|e| e.path.starts_with(&prefix)).count();
+        let response = ui.selectable_value(view, View::Folder(folder.to_owned()), format!("{name}  ({n})"));
+        drop_target(ui, &response, folder, actions);
+        let empty = n == 0 && !children.contains_key(folder);
+        response.context_menu(|ui| {
+            if ui.button("New design here…").clicked() {
+                actions.push(Action::AskNewDesign(folder.to_owned()));
+                ui.close();
+            }
+            if ui.button("New subfolder…").clicked() {
+                actions.push(Action::AskNewFolder(folder.to_owned()));
+                ui.close();
+            }
+            if ui.button("Show in file manager").clicked() {
+                actions.push(Action::ShowFolder(folder.to_owned()));
+                ui.close();
+            }
+            if ui
+                .add_enabled(empty, egui::Button::new("Delete folder"))
+                .on_disabled_hover_text("Only empty folders can be deleted")
+                .clicked()
+            {
+                actions.push(Action::DeleteFolder(folder.to_owned()));
+                ui.close();
+            }
+        });
+    }
+
+    fn search_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let slider_width = 140.0;
+            let clear_width = if self.search.is_empty() { 0.0 } else { 28.0 };
+            let edit = egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Search all designs: file, name, part number, description…   (Ctrl+F)")
+                .margin(egui::vec2(8.0, 6.0))
+                .desired_width(ui.available_width() - slider_width - clear_width - 3.0 * ui.spacing().item_spacing.x);
+            let response = ui.add(edit);
+            if std::mem::take(&mut self.focus_search) {
+                response.request_focus();
+            }
+            // The field gives up focus as Escape is pressed.
+            if (response.has_focus() || response.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.search.clear();
+            }
+            if !self.search.is_empty() && ui.button("×").on_hover_text("Clear the search (Esc)").clicked() {
+                self.search.clear();
+            }
+            ui.add_sized(
+                [slider_width, 20.0],
+                egui::Slider::new(&mut self.settings.thumb_width, ROW_THUMB_WIDTHS).show_value(false),
+            )
+            .on_hover_text("Thumbnail size");
+        });
+    }
+
+    fn list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        self.search_bar(ui);
+        self.refilter();
+        let searching = !self.search.trim().is_empty();
+        if searching {
+            let n = self.rows.len();
+            let noun = if n == 1 { "design" } else { "designs" };
+            ui.label(RichText::new(format!("{n} matching {noun} in the whole vault")).small().weak());
+        }
+        ui.add_space(4.0);
+        if self.rows.is_empty() {
             ui.centered_and_justified(|ui| {
-                ui.weak(if self.entries.is_empty() {
-                    if self.scan.is_some() { "Scanning…" } else { "No .solidcraft files in this vault yet" }
+                ui.weak(if searching {
+                    "Nothing matches".to_owned()
+                } else if self.entries.is_empty() {
+                    if self.scan.is_some() { "Scanning…" } else { "No .solidcraft files in this vault yet" }.to_owned()
                 } else {
-                    "Nothing matches"
+                    "No designs here. Drag designs onto a folder on the left to move them.".to_owned()
                 });
             });
             return;
         }
         // Thumbnails are looked up (and version thumbnails loaded) before the table borrows self.
-        let mut thumbs = Vec::with_capacity(visible.len());
-        for &i in &visible {
-            let e = self.entries[i].clone();
+        let mut thumbs = Vec::with_capacity(self.rows.len());
+        for i in 0..self.rows.len() {
+            let e = self.entries[self.rows[i].index].clone();
             thumbs.push(self.entry_thumb(&e));
         }
+        let width = self.settings.thumb_width.clamp(*ROW_THUMB_WIDTHS.start(), *ROW_THUMB_WIDTHS.end());
+        let thumb = egui::vec2(width, (width / THUMB_ASPECT).round());
         let text_height = ui.text_style_height(&egui::TextStyle::Body);
-        let row_height = (ROW_THUMB.y + 4.0).max(text_height * 2.4);
-        TableBuilder::new(ui)
+        let row_height = (thumb.y + 8.0).max(text_height * 2.6);
+        let show_description = row_height >= text_height * 4.0;
+        let mut columns: Vec<ListColumn> =
+            ListColumn::ALL.into_iter().filter(|c| !self.settings.hidden_columns.contains(c)).collect();
+        // Without room for every column, the date moves into the design's second line.
+        let spacing = ui.spacing().item_spacing.x;
+        let needed = thumb.x + 8.0 + 160.0 + columns.iter().map(|c| c.width() + spacing).sum::<f32>() + spacing;
+        if needed > ui.available_width() {
+            columns.retain(|c| *c != ListColumn::Modified);
+        }
+        let date_in_name = !self.settings.hidden_columns.contains(&ListColumn::Modified) && !columns.contains(&ListColumn::Modified);
+        let hidden = &self.settings.hidden_columns;
+        let folders = &self.folders;
+        let mut table = TableBuilder::new(ui)
+            // Widths are kept per column position: another column set gets its own.
+            .id_salt(("list", &columns))
             .striped(true)
             .resizable(true)
-            .sense(egui::Sense::click())
+            .sense(egui::Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(ROW_THUMB.x + 8.0))
-            .column(Column::initial(230.0).at_least(120.0).clip(true))
-            .column(Column::initial(96.0))
-            .column(Column::initial(40.0))
-            .column(Column::initial(110.0).clip(true))
-            .column(Column::initial(40.0))
-            .column(Column::remainder().at_least(118.0))
+            .column(Column::exact(thumb.x + 8.0))
+            .column(Column::remainder().at_least(160.0).clip(true));
+        for c in &columns {
+            table = table.column(Column::initial(c.width()).at_least(c.width().min(60.0)).clip(true));
+        }
+        table
             .header(text_height + 8.0, |mut h| {
-                for title in ["", "Design", "Status", "Ver", "Part number", "Rev", "Modified"] {
-                    h.col(|ui| {
+                let titles = ["", "Design"].into_iter().chain(columns.iter().map(|c| c.title()));
+                for title in titles {
+                    let (_, response) = h.col(|ui| {
                         ui.strong(title);
                     });
+                    let response = response.on_hover_text("Right-click to choose the columns");
+                    egui::Popup::context_menu(&response)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| column_toggles(ui, hidden, actions));
                 }
             })
             .body(|body| {
-                body.rows(row_height, visible.len(), |mut row| {
+                body.rows(row_height, self.rows.len(), |mut row| {
                     let n = row.index();
-                    let e = &self.entries[visible[n]];
+                    let r = &self.rows[n];
+                    let e = &self.entries[r.index];
                     let info = self.info(e);
                     let latest = e.latest.as_ref();
                     row.set_selected(self.selected.as_ref() == Some(&e.path));
-                    row.col(|ui| thumbnail(ui, thumbs[n].clone(), ROW_THUMB));
                     row.col(|ui| {
+                        thumbnail(ui, thumbs[n].clone(), thumb, egui::Sense::hover());
+                    });
+                    row.col(|ui| {
+                        let description = info.and_then(|i| i.metadata.description.as_deref()).filter(|_| show_description);
+                        let lines = if description.is_some() { 3.0 } else { 2.0 };
+                        let block = text_height * (lines + 0.4);
                         ui.vertical(|ui| {
-                            let file = e.path.rsplit_once('/').map_or(e.path.as_str(), |(_, f)| f);
-                            ui.add(egui::Label::new(RichText::new(file).strong()).truncate().selectable(false));
+                            ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
+                            let (folder, file) = e.path.rsplit_once('/').unwrap_or(("", &e.path));
+                            ui.add(egui::Label::new(highlighted(ui, file, &r.matches)).truncate().selectable(false));
                             let name = info.and_then(|i| i.name.clone()).or_else(|| latest.and_then(|v| v.name.clone()));
-                            let folder = e.path.rsplit_once('/').map_or("", |(d, _)| d);
-                            let sub = [name.as_deref().unwrap_or(""), folder]
+                            let date = if date_in_name { e.modified.map(system_time) } else { None };
+                            let sub = [name.as_deref().unwrap_or(""), folder, date.as_deref().unwrap_or("")]
                                 .into_iter()
                                 .filter(|s| !s.is_empty())
                                 .collect::<Vec<_>>()
                                 .join("  ·  ");
                             ui.add(egui::Label::new(RichText::new(sub).weak().small()).truncate().selectable(false));
+                            if let Some(d) = description {
+                                ui.add(egui::Label::new(RichText::new(d).small()).truncate().selectable(false));
+                            }
                         });
                     });
-                    row.col(|ui| {
-                        let (label, color) = status_style(e.status);
-                        ui.add(egui::Label::new(RichText::new(label).color(color)).selectable(false));
-                    });
-                    row.col(|ui| {
-                        ui.add(egui::Label::new(latest.map_or("-".into(), |v| format!("v{}", v.number))).selectable(false));
-                    });
                     let props = info.map(|i| &i.metadata);
-                    let part = props.and_then(|m| m.part_number.clone()).or_else(|| latest.and_then(|v| v.part_number.clone()));
-                    let rev = props.and_then(|m| m.revision.clone()).or_else(|| latest.and_then(|v| v.revision.clone()));
-                    row.col(|ui| {
-                        ui.add(egui::Label::new(part.unwrap_or_else(|| "-".into())).truncate().selectable(false));
-                    });
-                    row.col(|ui| {
-                        ui.add(egui::Label::new(rev.unwrap_or_else(|| "-".into())).selectable(false));
-                    });
-                    row.col(|ui| {
-                        ui.add(egui::Label::new(e.modified.map_or("-".into(), system_time)).selectable(false));
-                    });
+                    for c in &columns {
+                        row.col(|ui| {
+                            let text: RichText = match c {
+                                ListColumn::Status => {
+                                    let (label, color) = status_style(e.status);
+                                    RichText::new(label).color(color)
+                                }
+                                ListColumn::Version => latest.map_or("-".into(), |v| format!("v{}", v.number)).into(),
+                                ListColumn::PartNumber => props
+                                    .and_then(|m| m.part_number.clone())
+                                    .or_else(|| latest.and_then(|v| v.part_number.clone()))
+                                    .unwrap_or_else(|| "-".into())
+                                    .into(),
+                                ListColumn::Revision => props
+                                    .and_then(|m| m.revision.clone())
+                                    .or_else(|| latest.and_then(|v| v.revision.clone()))
+                                    .unwrap_or_else(|| "-".into())
+                                    .into(),
+                                ListColumn::Modified => e.modified.map_or("-".into(), system_time).into(),
+                            };
+                            ui.add(egui::Label::new(text).truncate().selectable(false));
+                        });
+                    }
                     let response = row.response();
+                    let present = e.status != Status::Missing;
+                    if present {
+                        response.dnd_set_drag_payload(DraggedDesign(e.path.clone()));
+                    }
                     if response.clicked() {
                         actions.push(Action::Select(e.path.clone()));
                     }
-                    if response.double_clicked() && e.status != Status::Missing {
+                    if response.double_clicked() && present {
                         actions.push(Action::Open(e.path.clone()));
                     }
                     response.context_menu(|ui| {
                         actions.push(Action::Select(e.path.clone()));
-                        if e.status != Status::Missing {
-                            if ui.button("Open in SolidCraft").clicked() {
-                                actions.push(Action::Open(e.path.clone()));
-                                ui.close();
-                            }
-                            if ui.button("Show in folder").clicked() {
-                                actions.push(Action::ShowInFolder(e.path.clone()));
-                                ui.close();
-                            }
+                        if !present {
+                            ui.weak("The file is missing");
+                            return;
                         }
+                        if ui.button("Open in SolidCraft").clicked() {
+                            actions.push(Action::Open(e.path.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Show in folder").clicked() {
+                            actions.push(Action::ShowInFolder(e.path.clone()));
+                            ui.close();
+                        }
+                        ui.menu_button("Move to", |ui| {
+                            let here = e.path.rsplit_once('/').map_or("", |(d, _)| d);
+                            for folder in std::iter::once("").chain(folders.iter().map(String::as_str)) {
+                                let label = if folder.is_empty() { "Top level" } else { folder };
+                                if ui.add_enabled(folder != here, egui::Button::new(label)).clicked() {
+                                    actions.push(Action::MoveToFolder { path: e.path.clone(), folder: folder.to_owned() });
+                                    ui.close();
+                                }
+                            }
+                        });
                     });
                 });
             });
@@ -670,7 +1116,10 @@ impl App {
 
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.add_space(6.0);
-            thumbnail(ui, image, THUMB);
+            let preview = thumbnail(ui, image, THUMB, egui::Sense::click());
+            if entry.status != Status::Missing && preview.on_hover_text("Double-click to open in SolidCraft").double_clicked() {
+                actions.push(Action::Open(entry.path.clone()));
+            }
             ui.add_space(6.0);
             ui.heading(&file);
             ui.weak(&entry.path);
@@ -761,10 +1210,19 @@ impl App {
                         ui.weak("Not in the vault yet. Add it to start its history.");
                     }
                     let history = self.history.clone();
+                    // The newest version with the working file's content is the working file; an
+                    // older one with the same content (before a restore) is only the same.
+                    let working = history.iter().find(|v| entry.hash.as_deref() == Some(v.hash.as_str())).map(|v| v.number);
                     for v in &history {
-                        let is_working = entry.hash.as_deref() == Some(v.hash.as_str());
+                        let same = if working == Some(v.number) {
+                            Sameness::Working
+                        } else if entry.hash.as_deref() == Some(v.hash.as_str()) {
+                            Sameness::SameContent
+                        } else {
+                            Sameness::Different
+                        };
                         let image = self.version_thumb(v);
-                        self.version_row(ui, &entry, v, is_working, image, actions);
+                        self.version_row(ui, &entry, v, same, image, actions);
                     }
                 });
         });
@@ -805,24 +1263,31 @@ impl App {
         ui: &mut egui::Ui,
         entry: &Entry,
         v: &Version,
-        is_working: bool,
+        same: Sameness,
         image: Option<egui::Image<'static>>,
         actions: &mut Vec<Action>,
     ) {
+        let is_working = same == Sameness::Working;
         let mut frame = egui::Frame::group(ui.style());
         if is_working {
             frame = frame.stroke(egui::Stroke::new(1.5, ui.visuals().selection.stroke.color));
         }
-        frame.show(ui, |ui| {
+        let shown = frame.show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                thumbnail(ui, image, HISTORY_THUMB);
+                thumbnail(ui, image, HISTORY_THUMB, egui::Sense::hover());
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("v{}", v.number)).strong());
                         ui.weak(format!("{} · {}", unix_time(v.created_at), v.author));
-                        if is_working {
-                            ui.label(RichText::new("working file").small().color(ui.visuals().selection.stroke.color));
+                        match same {
+                            Sameness::Working => {
+                                ui.label(RichText::new("working file").small().color(ui.visuals().selection.stroke.color));
+                            }
+                            Sameness::SameContent => {
+                                ui.label(RichText::new("same as working file").small().weak());
+                            }
+                            Sameness::Different => {}
                         }
                     });
                     if !v.comment.is_empty() {
@@ -841,8 +1306,9 @@ impl App {
                     }
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(!is_working, egui::Button::new("Restore…").small())
+                            .add_enabled(same == Sameness::Different, egui::Button::new("Restore…").small())
                             .on_hover_text("Put this version back into the working file")
+                            .on_disabled_hover_text("The working file already has this content")
                             .clicked()
                         {
                             actions.push(Action::AskRestore { path: entry.path.clone(), number: v.number });
@@ -854,6 +1320,11 @@ impl App {
                 });
             });
         });
+        let hint = if is_working { "Double-click to open in SolidCraft" } else { "Double-click to open a read-only copy" };
+        let response = shown.response.interact(egui::Sense::click()).on_hover_text(hint);
+        if response.double_clicked() && entry.status != Status::Missing {
+            actions.push(Action::OpenVersion { path: entry.path.clone(), version: v.clone() });
+        }
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -962,15 +1433,129 @@ impl App {
                         close |= ui.button("Cancel").clicked();
                     });
                 }
+                Dialog::NewFolder { parent, name } => {
+                    ui.heading("New folder");
+                    ui.label(if parent.is_empty() { "In the top level of the vault".to_owned() } else { format!("In {parent}") });
+                    let edit = ui.add(egui::TextEdit::singleline(name).hint_text("Folder name").desired_width(f32::INFINITY));
+                    if ui.memory(|m| m.focused().is_none()) {
+                        edit.request_focus();
+                    }
+                    let trimmed = name.trim().trim_matches('/');
+                    let target = if parent.is_empty() { trimmed.to_owned() } else { format!("{parent}/{trimmed}") };
+                    let exists = self.folders.contains(&target);
+                    if exists {
+                        ui.colored_label(ui.visuals().warn_fg_color, "A folder with this name exists already.");
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let ok = !trimmed.is_empty() && !exists;
+                        if ui.add_enabled(ok, egui::Button::new("Create")).clicked()
+                            || (ok && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        {
+                            actions.push(Action::CreateFolder(target.clone()));
+                            close = true;
+                        }
+                        close |= ui.button("Cancel").clicked();
+                    });
+                }
+                Dialog::NewDesign { folder, name, part_number, description, open } => {
+                    ui.heading("New design");
+                    ui.add_space(4.0);
+                    egui::Grid::new("new-design").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label("Folder");
+                        let shown = if folder.is_empty() { "Top level".to_owned() } else { folder.clone() };
+                        egui::ComboBox::from_id_salt("new-design-folder").selected_text(shown).width(260.0).show_ui(ui, |ui| {
+                            ui.selectable_value(folder, String::new(), "Top level");
+                            for f in &self.folders {
+                                ui.selectable_value(folder, f.clone(), f.as_str());
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Name");
+                        let edit = ui.add(egui::TextEdit::singleline(name).hint_text("e.g. wall-bracket").desired_width(260.0));
+                        if ui.memory(|m| m.focused().is_none()) {
+                            edit.request_focus();
+                        }
+                        ui.end_row();
+                        ui.label("Part number");
+                        ui.add(egui::TextEdit::singleline(part_number).hint_text("optional").desired_width(260.0));
+                        ui.end_row();
+                        ui.label("Description");
+                        ui.add(egui::TextEdit::singleline(description).hint_text("optional").desired_width(260.0));
+                        ui.end_row();
+                    });
+                    let stem = name.trim().trim_end_matches(".solidcraft").to_owned();
+                    let file = format!("{stem}.solidcraft");
+                    let path = if folder.is_empty() { file.clone() } else { format!("{folder}/{file}") };
+                    let valid = !stem.is_empty() && !stem.contains('/') && !stem.starts_with('.');
+                    let exists = valid && self.vault.as_ref().is_some_and(|v| v.absolute(&path).exists());
+                    if exists {
+                        ui.colored_label(ui.visuals().warn_fg_color, format!("{file} exists already in this folder."));
+                    } else if valid {
+                        ui.label(RichText::new(format!("Creates {path} as v1")).small().weak());
+                    }
+                    ui.checkbox(open, "Open it in SolidCraft");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let ok = valid && !exists;
+                        if ui.add_enabled(ok, egui::Button::new("Create")).clicked()
+                            || (ok && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        {
+                            actions.push(Action::CreateDesign {
+                                path: path.clone(),
+                                part_number: part_number.clone(),
+                                description: description.clone(),
+                                open: *open,
+                            });
+                            close = true;
+                        }
+                        close |= ui.button("Cancel").clicked();
+                    });
+                }
                 Dialog::Settings { open_command } => {
                     ui.heading("Settings");
-                    ui.label("Program that opens a design (the file is added at the end):");
-                    ui.add(
-                        egui::TextEdit::singleline(open_command)
-                            .hint_text("automatic: solidcraft if installed, else xdg-open")
-                            .desired_width(f32::INFINITY),
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Opening designs").strong());
+                    match &self.detected {
+                        Some(found) => {
+                            ui.label(format!("SolidCraft found: {}", found.command[0]));
+                            ui.label(RichText::new(format!("from {}", found.source)).small().weak());
+                        }
+                        None => {
+                            ui.label("SolidCraft was not found (no desktop entry, not on PATH). Choose its AppImage below.");
+                        }
+                    }
+                    ui.add_space(6.0);
+                    ui.label("Use this program instead (optional):");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(open_command)
+                                .hint_text("e.g. ~/Applications/SolidCraft.AppImage")
+                                .desired_width(ui.available_width() - 90.0),
+                        );
+                        if ui.button("Browse…").clicked() {
+                            if let Some(file) = rfd::FileDialog::new().set_title("SolidCraft program or AppImage").pick_file() {
+                                *open_command = file.display().to_string();
+                            }
+                        }
+                    });
+                    ui.label(
+                        RichText::new("Leave empty to use SolidCraft as found. %f stands for the design; without it, the design is added at the end.")
+                            .small()
+                            .weak(),
                     );
-                    ui.label(RichText::new("e.g. ~/Apps/SolidCraft.AppImage, or snap run solidcraft").small().weak());
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Interface size").strong());
+                    ui.horizontal_wrapped(|ui| {
+                        let current = ui.ctx().zoom_factor();
+                        for zoom in ZOOM_PRESETS {
+                            let selected = (current - zoom).abs() < 0.01;
+                            if ui.selectable_label(selected, format!("{:.0} %", zoom * 100.0)).clicked() {
+                                ui.ctx().set_zoom_factor(zoom);
+                            }
+                        }
+                    });
+                    ui.label(RichText::new("Also Ctrl + and Ctrl - anywhere, Ctrl 0 to reset.").small().weak());
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
@@ -996,25 +1581,36 @@ impl eframe::App for App {
             self.start_scan(ctx);
         }
         self.focused = focused;
-        ctx.request_repaint_after(RESCAN_EVERY);
+        if focused {
+            // Unfocused, nothing is scheduled: regaining focus rescans anyway.
+            ctx.request_repaint_after(RESCAN_EVERY);
+        }
+        self.settings.zoom = ctx.zoom_factor();
         if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
             self.start_scan(ctx);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.focus_search = true;
         }
 
         let mut actions = Vec::new();
         egui::TopBottomPanel::top("top").show(ctx, |ui| self.top_bar(ui, &mut actions));
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| self.status_bar(ui));
         if self.vault.is_some() {
-            egui::SidePanel::left("folders").default_width(220.0).min_width(150.0).show(ctx, |ui| self.left_panel(ui));
+            egui::SidePanel::left("folders")
+                .default_width(220.0)
+                .min_width(150.0)
+                .show(ctx, |ui| self.left_panel(ui, &mut actions));
             egui::SidePanel::right("details")
                 .default_width(360.0)
                 .min_width(280.0)
                 .show(ctx, |ui| self.details(ui, &mut actions));
-            egui::CentralPanel::default().show(ctx, |ui| self.table(ui, &mut actions));
+            egui::CentralPanel::default().show(ctx, |ui| self.list(ui, &mut actions));
         } else {
             egui::CentralPanel::default().show(ctx, |ui| self.welcome(ui, &mut actions));
         }
         self.dialogs(ctx, &mut actions);
+        drag_label(ctx);
         for action in actions {
             self.apply(ctx, action);
         }
@@ -1079,19 +1675,38 @@ fn properties(ui: &mut egui::Ui, entry: &Entry, info: Option<&scformat::DesignIn
 }
 
 /// Draws a thumbnail, or a placeholder of the same size.
-fn thumbnail(ui: &mut egui::Ui, image: Option<egui::Image<'static>>, size: egui::Vec2) {
+fn thumbnail(ui: &mut egui::Ui, image: Option<egui::Image<'static>>, size: egui::Vec2, sense: egui::Sense) -> egui::Response {
     match image {
-        Some(image) => {
-            ui.add(image.fit_to_exact_size(size).corner_radius(4.0));
-        }
+        Some(image) => ui.add(image.fit_to_exact_size(size).corner_radius(4.0).sense(sense)),
         None => {
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let (rect, response) = ui.allocate_exact_size(size, sense);
             let visuals = ui.visuals();
             ui.painter().rect_filled(rect, 4.0, visuals.faint_bg_color);
             ui.painter().rect_stroke(rect, 4.0, visuals.widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
             let font = if size.y > 80.0 { egui::FontId::proportional(13.0) } else { egui::FontId::proportional(18.0) };
             let text = if size.y > 80.0 { "No saved preview" } else { "⬚" };
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, font, visuals.weak_text_color());
+            response
+        }
+    }
+}
+
+/// How a version in the history relates to the working file.
+#[derive(Clone, Copy, PartialEq)]
+enum Sameness {
+    /// The newest version with the working file's content.
+    Working,
+    /// An older version with that content (the one a restore brought back).
+    SameContent,
+    Different,
+}
+
+/// Checkboxes for the list's optional columns.
+fn column_toggles(ui: &mut egui::Ui, hidden: &[ListColumn], actions: &mut Vec<Action>) {
+    for column in ListColumn::ALL {
+        let mut shown = !hidden.contains(&column);
+        if ui.checkbox(&mut shown, column.menu_label()).changed() {
+            actions.push(Action::ToggleColumn(column));
         }
     }
 }
@@ -1121,8 +1736,45 @@ fn resolve_link(from: &str, link: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-fn on_path(program: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|d| d.join(program).is_file()))
+/// Makes a folder entry take dragged designs (moving them into `folder`; "" is the top level).
+fn drop_target(ui: &egui::Ui, response: &egui::Response, folder: &str, actions: &mut Vec<Action>) {
+    if response.dnd_hover_payload::<DraggedDesign>().is_some() {
+        let stroke = egui::Stroke::new(2.0, ui.visuals().selection.stroke.color);
+        ui.painter().rect_stroke(response.rect.expand(2.0), 4.0, stroke, egui::StrokeKind::Outside);
+    }
+    if let Some(design) = response.dnd_release_payload::<DraggedDesign>() {
+        actions.push(Action::MoveToFolder { path: design.0.clone(), folder: folder.to_owned() });
+    }
+}
+
+/// Shows which design is being dragged, next to the pointer.
+fn drag_label(ctx: &egui::Context) {
+    let Some(design) = egui::DragAndDrop::payload::<DraggedDesign>(ctx) else { return };
+    let Some(pos) = ctx.pointer_interact_pos() else { return };
+    let file = design.0.rsplit_once('/').map_or(design.0.as_str(), |(_, f)| f).to_owned();
+    egui::Area::new(egui::Id::new("dragged-design"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pos + egui::vec2(14.0, 10.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(format!("Move {file} to…"));
+            });
+        });
+}
+
+/// `text` in the strong text colour, with the chars at `matches` highlighted.
+fn highlighted(ui: &egui::Ui, text: &str, matches: &[usize]) -> egui::text::LayoutJob {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let normal = egui::TextFormat::simple(font.clone(), ui.visuals().strong_text_color());
+    let hit_color = ui.visuals().warn_fg_color;
+    let hit = egui::TextFormat { underline: egui::Stroke::new(1.0, hit_color), ..egui::TextFormat::simple(font, hit_color) };
+    let mut job = egui::text::LayoutJob::default();
+    for (i, c) in text.chars().enumerate() {
+        let format = if matches.binary_search(&i).is_ok() { hit.clone() } else { normal.clone() };
+        job.append(c.encode_utf8(&mut [0; 4]), 0.0, format);
+    }
+    job
 }
 
 fn unix_time(secs: i64) -> String {

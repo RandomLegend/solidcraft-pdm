@@ -10,7 +10,7 @@
 //!
 //! The format is detected from the contents (ZIP signature `50 4b 03 04`), never from the name.
 //!
-//! This crate reads only what a PDM needs: the design properties (`metadata`), name, units,
+//! This crate reads only what a PDM needs (and writes new, empty designs, [`new_design`]): the design properties (`metadata`), name, units,
 //! counts, components, links to other design files and the thumbnail. It never evaluates
 //! geometry and does not depend on SolidCraft's crates, so it keeps working across SolidCraft
 //! releases: unknown fields are ignored.
@@ -145,6 +145,32 @@ impl DesignInfo {
     pub fn format_version(&self) -> Option<u32> {
         self.format.as_deref()?.strip_prefix("solidcraft/")?.parse().ok()
     }
+}
+
+/// A new, empty design: plain JSON in format 1, which every SolidCraft release opens and upgrades
+/// (checked with SolidCraft 0.18.3: it opens such a file, saves it as a `solidcraft/29`
+/// container, and keeps the properties). `properties` are well-known `metadata` keys such as
+/// `part_number`; empty values are left out.
+pub fn new_design(name: &str, properties: &[(&str, &str)]) -> Vec<u8> {
+    let metadata: serde_json::Map<String, serde_json::Value> = properties
+        .iter()
+        .filter(|(_, v)| !v.trim().is_empty())
+        .map(|(k, v)| ((*k).to_owned(), serde_json::Value::String(v.trim().to_owned())))
+        .collect();
+    let mut doc = serde_json::json!({
+        "format": "solidcraft/1",
+        "name": name,
+        "units": "mm",
+        "params": [],
+        "features": [],
+        "next_id": 1,
+    });
+    if !metadata.is_empty() {
+        doc["metadata"] = serde_json::Value::Object(metadata);
+    }
+    let mut bytes = serde_json::to_vec_pretty(&doc).expect("a JSON value serializes");
+    bytes.push(b'\n');
+    bytes
 }
 
 /// Reads a design file's information.

@@ -22,17 +22,43 @@ cargo run --release -p scpdm -- --help        # command line
 
 ## Desktop app
 
-Folders and status filters on the left, designs with thumbnails in the middle, and for the
-selected design: properties, links (*Uses* / *Used in*), check-in and history with each
-version's thumbnail. The vault is rescanned every few seconds and when the window regains focus,
-so saving in SolidCraft shows up as *Modified* by itself. Double-click opens a design in
-SolidCraft (`solidcraft` on `PATH`, else `xdg-open`; set your own under Vault > Settings, e.g.
-an AppImage path).
+- **Left:** status filters and the folder tree (also empty folders). *+ New folder* creates one in
+  the selected folder; right-click a folder for a subfolder, *Show in file manager* or *Delete*
+  (empty folders only). Drag designs onto a folder, or use *Move to* in a design's right-click
+  menu, to move them with their history.
+- **Middle:** the search bar (Ctrl+F, Esc clears) searches the whole vault, whatever folder is
+  selected: fuzzy and ranked, each word matched within the file name, design name, part number,
+  description, project or folder, with the matched letters highlighted. The slider sets the
+  thumbnail size.
+- **Right:** the selected design's properties, links (*Uses* / *Used in*), check-in and history
+  with each version's thumbnail.
+
+- **Top:** *+ New design* creates an empty design (name, folder, optional part number and
+  description), checks it in as v1 and opens it in SolidCraft. *View* chooses the list columns
+  (also by right-clicking the list header) and the interface size (also Ctrl + / Ctrl - /
+  Ctrl 0; more presets in Vault > Settings).
+- **Double-click** a design, its preview or the working version in the history to open it in
+  SolidCraft; an older version opens as a read-only copy (to work on it, restore it first).
+
+The vault is rescanned every few seconds while the window has focus, and when it regains focus,
+so saving in SolidCraft shows up as *Modified* by itself.
+
+New designs are written as plain JSON in format 1, which every SolidCraft release opens and
+upgrades (checked with SolidCraft 0.18.3: it saves such a file as a `solidcraft/29` container
+and keeps its properties).
+
+**Opening designs.** Double-click opens a design in SolidCraft as installed: the app finds
+SolidCraft's desktop entry (the one the AppImage installs on its first run, or one from Gear
+Lever, AppImageLauncher, appimaged, Flatpak or a package) and runs its `Exec` line, else
+`solidcraft` on `PATH`. It does not use `xdg-open`: the AppImage registers no MIME type for
+`*.solidcraft`, so `xdg-open` guesses from the contents (ZIP or JSON) and may pick an unrelated
+program. Vault > Settings shows what was found and takes another program or AppImage.
 
 ## Command line
 
 ```text
 scpdm init [dir]                 make a folder a vault
+scpdm new <file> [--part-number P] [--description D]   create an empty design as v1
 scpdm status                     untracked / modified / missing designs
 scpdm ci <files…> -m "comment"   check in
 scpdm log <file>                 versions, newest first

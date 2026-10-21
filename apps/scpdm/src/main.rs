@@ -27,6 +27,14 @@ enum Command {
     Init { dir: Option<PathBuf> },
     /// Show which designs are untracked, modified or missing
     Status,
+    /// Create an empty design (checked in as v1)
+    New {
+        file: PathBuf,
+        #[arg(long)]
+        part_number: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
     /// Record files' current content as new versions
     #[command(visible_alias = "ci")]
     Checkin {
@@ -72,6 +80,24 @@ fn run(command: Command) -> Result {
             Ok(())
         }
         Command::Status => status(),
+        Command::New { file, part_number, description } => {
+            let mut vault = Vault::discover(".")?;
+            let mut path = vault.relative(&file)?;
+            if !path.ends_with(".solidcraft") {
+                path.push_str(".solidcraft");
+            }
+            let name = path.rsplit('/').next().unwrap_or(&path).trim_end_matches(".solidcraft").to_owned();
+            let bytes = scformat::new_design(
+                &name,
+                &[
+                    ("part_number", part_number.as_deref().unwrap_or("")),
+                    ("description", description.as_deref().unwrap_or("")),
+                ],
+            );
+            vault.add_new(&path, &bytes, "New design")?;
+            println!("{path}: v1");
+            Ok(())
+        }
         Command::Checkin { files, message } => {
             let mut vault = Vault::discover(".")?;
             for file in files {

@@ -54,6 +54,10 @@ pub enum Error {
     Missing(String),
     #[error("{0} already exists")]
     Exists(String),
+    #[error("{0:?} is not a valid path in the vault (use folder/name; no \"..\", no hidden names)")]
+    InvalidPath(String),
+    #[error("folder {0} is not empty")]
+    FolderNotEmpty(String),
     #[error("vault store is damaged: {0}")]
     Corrupt(String),
 }
@@ -252,6 +256,22 @@ impl Vault {
         self.record(path, &bytes, &hash, comment)
     }
 
+    /// Writes a new design file (never over an existing one) and checks it in as v1.
+    pub fn add_new(&mut self, path: &str, bytes: &[u8], comment: &str) -> Result<Version> {
+        check_path(path)?;
+        let file = self.absolute(path);
+        if let Some(dir) = file.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let mut out = fs::OpenOptions::new().write(true).create_new(true).open(&file).map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => Error::Exists(path.to_owned()),
+            _ => e.into(),
+        })?;
+        std::io::Write::write_all(&mut out, bytes)?;
+        out.sync_all()?;
+        self.check_in(path, comment)
+    }
+
     /// Every version of a document, newest first.
     pub fn history(&self, path: &str) -> Result<Vec<Version>> {
         let doc = self.document_id(path)?.ok_or_else(|| Error::NotTracked(path.to_owned()))?;
@@ -305,6 +325,7 @@ impl Vault {
 
     /// Moves or renames a file inside the vault, keeping its history.
     pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
+        check_path(to)?;
         let (src, dst) = (self.absolute(from), self.absolute(to));
         if !src.is_file() {
             return Err(Error::Missing(from.to_owned()));
@@ -321,8 +342,62 @@ impl Vault {
         Ok(())
     }
 
+    /// Moves a design into `folder` ("" for the top level), keeping its name and history.
+    /// Returns the new path.
+    pub fn move_to_folder(&mut self, path: &str, folder: &str) -> Result<String> {
+        let name = path.rsplit_once('/').map_or(path, |(_, n)| n);
+        let to = if folder.is_empty() { name.to_owned() } else { format!("{folder}/{name}") };
+        if to != path {
+            self.rename(path, &to)?;
+        }
+        Ok(to)
+    }
+
+    /// Creates a folder (and missing parents).
+    pub fn create_folder(&self, folder: &str) -> Result<()> {
+        check_path(folder)?;
+        let dir = self.absolute(folder);
+        if dir.exists() {
+            return Err(Error::Exists(folder.to_owned()));
+        }
+        fs::create_dir_all(dir)?;
+        Ok(())
+    }
+
+    /// Removes an empty folder.
+    pub fn remove_folder(&self, folder: &str) -> Result<()> {
+        check_path(folder)?;
+        let dir = self.absolute(folder);
+        if fs::read_dir(&dir)?.next().is_some() {
+            return Err(Error::FolderNotEmpty(folder.to_owned()));
+        }
+        fs::remove_dir(dir)?;
+        Ok(())
+    }
+
+    /// Every folder in the vault (also empty ones), as vault paths, sorted.
+    pub fn folders(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        let mut stack = vec![(self.root.clone(), String::new())];
+        while let Some((dir, prefix)) = stack.pop() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let path = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+                stack.push((entry.path(), path.clone()));
+                out.push(path);
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     /// Attaches a missing document's history to the file now at `to` (moved outside the tool).
     pub fn relink(&mut self, missing: &str, to: &str) -> Result<()> {
+        check_path(to)?;
         if self.document_id(missing)?.is_none() {
             return Err(Error::NotTracked(missing.to_owned()));
         }
@@ -534,6 +609,15 @@ fn cached_hash(db: &Connection, path: &str, file: &Path, meta: &fs::Metadata) ->
         params![path, size, mtime, h],
     )?;
     Ok(Some(h))
+}
+
+/// A vault path must be `name` or `folder/…/name`: no empty, `.`, `..` or hidden (`.pdm`)
+/// components, no backslashes.
+fn check_path(path: &str) -> Result<()> {
+    let ok = !path.is_empty()
+        && !path.contains('\\')
+        && path.split('/').all(|c| !c.is_empty() && !c.starts_with('.'));
+    if ok { Ok(()) } else { Err(Error::InvalidPath(path.to_owned())) }
 }
 
 /// Whether `path` names a SolidCraft design (`.solidcraft`, or the legacy `.solvecraft`).

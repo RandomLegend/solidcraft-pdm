@@ -1,6 +1,6 @@
 [package]
 name = "scformat"
-description = "Read-only access to SolidCraft design files (.solidcraft) for the PDM: properties, links, thumbnail"
+description = "SolidCraft design files (.solidcraft) for the PDM: reads properties, links and thumbnail; writes new empty designs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

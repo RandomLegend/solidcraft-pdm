@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use scpdm_gui::app::App;
@@ -199,4 +200,214 @@ fn checks_in_from_the_details_panel() {
     harness.get_by_label("History (2)");
     harness.get_by_label("5 designs · 0 modified · 1 untracked · 0 missing");
     assert!(harness.query_by_label("Modified  (1)").is_none());
+}
+
+fn open_demo() -> (tempfile::TempDir, std::path::PathBuf, Harness<'static, App>) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    demo_vault(&root);
+    let start = root.clone();
+    // 60 fps, so two clicks fit egui's 0.3 s double-click window (the default step is 0.25 s).
+    let mut harness = Harness::builder()
+        .with_size([1280.0, 800.0])
+        .with_step_dt(1.0 / 60.0)
+        .build_eframe(move |cc| App::new(cc, Some(start)));
+    settle(&mut harness);
+    (dir, root, harness)
+}
+
+fn type_text(harness: &mut Harness<'_, App>, text: &str) {
+    harness.event(egui::Event::Text(text.into()));
+    harness.run_steps(2);
+}
+
+#[test]
+fn search_finds_designs_in_every_folder() {
+    let (_dir, _root, mut harness) = open_demo();
+    // A folder is selected, but a search looks through the whole vault.
+    harness.get_by_label("assembly  (1)").click();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("pi4-case.solidcraft").is_none());
+
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    harness.run_steps(2);
+    type_text(&mut harness, "vented"); // only in the case's description
+    harness.get_by_label("1 matching design in the whole vault");
+    harness.get_by_label("pi4-case.solidcraft");
+
+    harness.key_press(egui::Key::Escape); // clears the search and leaves the field
+    harness.run_steps(2);
+    harness.get_by_label("pi4-enclosure.solidcraft"); // the selected folder again
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    harness.run_steps(2);
+    type_text(&mut harness, "p4lid"); // fuzzy: letters in order
+    harness.get_by_label("pi4-lid.solidcraft");
+    assert!(harness.query_by_label("pi4-case.solidcraft").is_none());
+    screenshot(&mut harness, "5-search");
+}
+
+#[test]
+fn creates_folders() {
+    let (_dir, root, mut harness) = open_demo();
+    harness.get_by_label("+ New folder").click();
+    harness.run_steps(3);
+    type_text(&mut harness, "drawings");
+    harness.key_press(egui::Key::Enter);
+    settle(&mut harness);
+    assert!(root.join("drawings").is_dir());
+    harness.get_by_label("drawings  (0)");
+}
+
+#[test]
+fn dragging_a_design_onto_a_folder_moves_it() {
+    let (_dir, root, mut harness) = open_demo();
+    let from = harness.get_by_label("m3-screw.solidcraft").rect().center();
+    let to = harness.get_by_label("enclosure  (2)").rect().center();
+    harness.hover_at(from);
+    harness.drag_at(from);
+    harness.step();
+    for i in 1..=8 {
+        harness.hover_at(from + (to - from) * (i as f32 / 8.0));
+        harness.step();
+    }
+    harness.drop_at(to);
+    settle(&mut harness);
+
+    assert!(root.join("enclosure/m3-screw.solidcraft").is_file());
+    assert!(!root.join("parts/fasteners/m3-screw.solidcraft").exists());
+    harness.get_by_label("enclosure  (3)");
+}
+
+/// An "open" program that records what it was asked to open.
+fn recording_opener(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let log = dir.join("opened.log");
+    let script = dir.join("opener.sh");
+    fs::write(&script, format!("#!/bin/sh\necho \"$1\" >> '{}'\n", log.display())).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    (script, log)
+}
+
+/// What the opener recorded, waiting (up to a second) for `n` lines: it runs as its own process.
+fn opened_lines(log: &Path, n: usize) -> Vec<String> {
+    let read = || fs::read_to_string(log).map(|t| t.lines().map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
+    for _ in 0..100 {
+        if read().len() >= n {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    read()
+}
+
+/// Two clicks in a row (raw events: `drop_at` would also take the pointer away in between).
+fn double_click_at<S>(harness: &mut Harness<'_, S>, pos: egui::Pos2) {
+    harness.hover_at(pos);
+    harness.step();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.step();
+        }
+    }
+    harness.run_steps(2);
+}
+
+#[test]
+fn double_clicking_a_row_opens_the_design() {
+    let tools = tempfile::tempdir().unwrap();
+    let (opener, log) = recording_opener(tools.path());
+    let (_dir, root, mut harness) = open_demo();
+    harness.state_mut().set_open_command(&opener.to_string_lossy());
+    let file = root.join("enclosure/pi4-case.solidcraft").display().to_string();
+
+    let name = harness.get_by_label("pi4-case.solidcraft").rect();
+    double_click_at(&mut harness, name.center());
+    harness.run_steps(60); // a second apart, or egui counts a triple click
+    double_click_at(&mut harness, egui::pos2(name.left() - 60.0, name.center().y)); // the thumbnail
+    assert_eq!(opened_lines(&log, 2), [file.clone(), file]);
+}
+
+#[test]
+fn columns_can_be_hidden() {
+    let (_dir, _root, mut harness) = open_demo();
+    harness.get_by_label("Ver");
+    harness.get_by_label("Rev");
+    harness.get_by_label("View").click();
+    harness.run_steps(2);
+    harness.get_by_label("Version").click();
+    harness.run_steps(2);
+    harness.get_by_label("Revision").click();
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Ver").is_none());
+    assert!(harness.query_by_label("Rev").is_none());
+    harness.get_by_label("Part number");
+    screenshot(&mut harness, "6-columns");
+}
+
+#[test]
+fn after_a_restore_only_the_newest_version_is_the_working_file() {
+    let tools = tempfile::tempdir().unwrap();
+    let (opener, log) = recording_opener(tools.path());
+    let (_dir, root, mut harness) = open_demo();
+    harness.state_mut().set_open_command(&opener.to_string_lossy());
+    // v1 (blue), v2 (orange); restoring v1 makes v3 with v1's content.
+    Vault::open(&root).unwrap().restore("enclosure/pi4-lid.solidcraft", 1).unwrap();
+    harness.key_press(egui::Key::F5); // restored behind the app's back: rescan now
+    settle(&mut harness);
+    harness.state_mut().select("enclosure/pi4-lid.solidcraft");
+    settle(&mut harness);
+    harness.get_by_label("Properties").click(); // collapsed, so the whole history fits
+    harness.run_steps(4);
+    screenshot(&mut harness, "7-restored");
+    harness.get_by_label("History (3)");
+    assert_eq!(harness.query_all_by_label("working file").count(), 1);
+    harness.get_by_label("same as working file");
+
+    // Double-clicks: the preview and the working version open the file, v2 a read-only copy.
+    let file = root.join("enclosure/pi4-lid.solidcraft").display().to_string();
+    let path = harness.get_by_label("enclosure/pi4-lid.solidcraft").rect(); // under the heading, under the preview
+    double_click_at(&mut harness, egui::pos2(path.left() + 100.0, path.top() - 90.0));
+    harness.run_steps(60);
+    let v3 = harness.get_by_label("Restored v1").rect().center();
+    double_click_at(&mut harness, v3);
+    harness.run_steps(60);
+    let v2 = harness.get_by_label("Deeper snap fit, orange PETG").rect().center();
+    double_click_at(&mut harness, v2);
+    let lines = opened_lines(&log, 3);
+    assert_eq!(lines[..2], [file.clone(), file]);
+    assert!(lines[2].ends_with("pi4-lid (v2, read-only).solidcraft"), "{lines:?}");
+    let copy = Path::new(&lines[2]);
+    assert!(fs::metadata(copy).unwrap().permissions().readonly());
+    assert!(fs::metadata(copy.parent().unwrap()).unwrap().permissions().readonly(), "SolidCraft cannot save next to it");
+}
+
+#[test]
+fn creates_a_new_design_and_opens_it() {
+    let tools = tempfile::tempdir().unwrap();
+    let (opener, log) = recording_opener(tools.path());
+    let (_dir, root, mut harness) = open_demo();
+    harness.state_mut().set_open_command(&opener.to_string_lossy());
+    harness.get_by_label("enclosure  (2)").click();
+    harness.run_steps(2);
+    harness.get_by_label("+ New design").click();
+    harness.run_steps(3);
+    type_text(&mut harness, "wall-bracket");
+    harness.get_by_label("Creates enclosure/wall-bracket.solidcraft as v1");
+    harness.key_press(egui::Key::Enter);
+    settle(&mut harness);
+
+    let file = root.join("enclosure/wall-bracket.solidcraft");
+    let info = scformat::read_file(&file).unwrap();
+    assert_eq!(info.name.as_deref(), Some("wall-bracket"));
+    assert_eq!(opened_lines(&log, 1), [file.display().to_string()]);
+    harness.get_by_label("History (1)");
+    harness.get_by_label("New design");
 }
