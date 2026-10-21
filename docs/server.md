@@ -4,6 +4,8 @@ SolidCraft PDM works on its own, for one person. For a small team, a **server** 
 shared vaults: everyone works in a folder of their own (a *workspace*), and a design is
 changed by one person at a time, who has it *checked out*.
 
+<img src="images/server-app.png" alt="The app on a team server" width="100%">
+
 New in 0.2. The server runs on Linux, with Docker or as a program of its own; a Windows build
 comes later. It is meant for a trusted team on one network or a VPN.
 
@@ -111,6 +113,8 @@ password would travel over `http://` to another machine.
 
 ## The administration page
 
+<img src="images/server-dashboard.png" alt="The administration page's dashboard" width="100%">
+
 A browser at the server's address (`http://server:7380`, or the HTTPS name) opens its
 administration page. Administrators log in there with their user name and password; other
 users cannot.
@@ -122,6 +126,8 @@ users cannot.
   administrators; access per vault (no access, read, read and change, administer); log a user
   out everywhere; remove a user. Not yourself: your own administrator rights and account stay.
 - **Vaults:** each vault's numbers, and new vaults.
+
+<img src="images/server-users.png" alt="Users and their access to the vaults" width="100%">
 
 The command line (`scpdm-server user …`, `vault …`, `grant …`) still works alongside; the first
 administrator comes from there (`user add root --admin`).

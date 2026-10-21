@@ -7,12 +7,17 @@
   <a href="https://gitlab.com/randomlegend/solidcraft-pdm/-/pipelines"><img src="https://gitlab.com/randomlegend/solidcraft-pdm/badges/main/pipeline.svg" alt="Pipeline"></a>
 </p>
 
+<p align="center">
+  <b><a href="#features">Features</a> · <a href="#team-server">Team server</a> · <a href="#install">Install</a> ·
+  <a href="docs/guide.md">Guide</a> · <a href="docs/server.md">Server guide</a> · <a href="#command-line">Command line</a></b>
+</p>
+
 **SolidCraft PDM** keeps your [SolidCraft](https://github.com/tangency-labs/solidcraft) designs
 in order: browse them by folder with big thumbnails, find anything with a fuzzy search, check in
 versions, see what changed, release revisions, and move files without breaking the links between
 them. Your designs stay ordinary files in an ordinary folder; SolidCraft opens and saves them as
 before. Native on Linux, written in Rust; for one person, or for a small team with the
-optional [server](docs/server.md).
+optional [team server](#team-server).
 
 ## Features
 
@@ -44,12 +49,42 @@ optional [server](docs/server.md).
   folder.
 - **Made for SolidCraft.** Double-click opens a design in SolidCraft as installed, also as an
   AppImage; *+ New design* starts one. The interface scales up to 250 % for large screens.
-- **Optional team server.** Share vaults with a small team: everyone works in a folder of their
-  own, checks designs out (one person at a time) and checks them in; moves, releases and
-  properties are changed on the server, which has an administration page in the browser for
-  users, access and a dashboard. See [docs/server.md](docs/server.md).
 
 More in the [guide](docs/guide.md).
+
+## Team server
+
+Share vaults with a small team on your network or VPN. Everyone works in a folder of their own
+(a *workspace*, where SolidCraft opens and saves the designs as usual) and **checks a design
+out** before changing it: one person at a time, since CAD files cannot be merged. Checking in
+uploads the new version; the others see it as *Newer on server* and get it with a click.
+
+<img src="docs/images/server-app.png" alt="The app on a team server: designs up to date, newer on the server, checked out by you and by ben, not downloaded yet" width="100%">
+
+- **Nothing is overwritten.** A change made without checking out, or on an old version, is
+  caught; your copy stays as you made it.
+- **Moves, releases and properties** are changed on the server, which updates the links in
+  other designs; everyone's workspace follows.
+- **The app and the command line** both work with it: *Vault > Connect to a server…*, or
+  `scpdm remote …`.
+
+<img src="docs/images/server-dashboard.png" alt="The server's administration page: users, vaults, designs, check-ins per day, recent activity and what is checked out" width="100%">
+
+- **An administration page** in the browser, at the server's address: a dashboard with who is
+  online, check-ins per day, recent activity and what is checked out (a forgotten check-out can
+  be broken there); users, their passwords and their access to each vault; vaults.
+
+<img src="docs/images/server-users.png" alt="Users and their access to the vaults" width="100%">
+
+Run it with Docker (with HTTPS through Caddy if you like), or as a single program:
+
+```sh
+curl -O https://gitlab.com/randomlegend/solidcraft-pdm/-/raw/main/packaging/docker/compose.yml
+docker compose up -d
+docker compose exec pdm scpdm-server user add admin --admin    # then open http://<server>:7380
+```
+
+Everything about it, from setup and backups to HTTPS: the **[server guide](docs/server.md)**.
 
 ## Install
 
@@ -69,8 +104,7 @@ restarts; see the [guide](docs/guide.md#updates).
 
 Windows 10 / 11: prepared, built by hand in CI; see [docs/windows.md](docs/windows.md).
 
-The team server runs with Docker (`registry.gitlab.com/randomlegend/solidcraft-pdm/server`,
-with a `compose.yml` that adds HTTPS) or as a program; see [docs/server.md](docs/server.md).
+The team server: see [Team server](#team-server).
 
 ## Command line
 
@@ -117,7 +151,7 @@ packaging/linux/build-appimage.sh             # dist/SolidCraft-PDM-<version>-x8
 | `apps/scpdm-server` | Team server (axum): users, sessions, access, check-out locks |
 | `apps/scpdm-gui` | Desktop app (egui), binary `solidcraft-pdm` |
 | `packaging/` | AppImage, Windows installer, server Docker image and compose file, icons (`make-icons.py`; the source is `assets/solidcraft-pdm.svg`) |
-| `docs/` | [Guide](docs/guide.md), [Server](docs/server.md), [Windows](docs/windows.md), README images (`make-screenshots.sh`) |
+| `docs/` | [Guide](docs/guide.md), [Server](docs/server.md), [Windows](docs/windows.md), README images (`make-screenshots.sh`, `make-server-screenshots.sh`) |
 
 ## Releasing
 

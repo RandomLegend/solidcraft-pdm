@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Makes the README's images in docs/images/: a demo vault of SolidCraft's own sample designs,
-# with thumbnails SolidCraft renders, photographed by the GUI test apps/scpdm-gui/tests/readme.rs,
-# and a cover from the first screenshot.
+# with thumbnails SolidCraft renders, photographed by the GUI test apps/scpdm-gui/tests/readme.rs
+# (also on a team server: server-app.png), and a cover from the first screenshot. The server's
+# administration page: docs/make-server-screenshots.sh.
 #
 #   SOLIDCRAFT_CLI=/path/to/solidcraft-cli docs/make-screenshots.sh [solidcraft-checkout]
 #

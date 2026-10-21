@@ -11,6 +11,15 @@ whose heading starts with `## <version>`.
   vaults, designs, versions, check-outs, disk use, check-ins per day, recent activity),
   managing users and their access to vaults, adding vaults, breaking a check-out.
 
+### App
+
+- In a workspace, the filters and the status bar say *Not downloaded* and *Not on the server*
+  instead of *Missing* and *Untracked*.
+
+### Builds
+
+- The AppImage is built on `main` only when a push changes the app (by hand otherwise).
+
 ## 0.2.0 — 2026-10-21
 
 Shared vaults for a small team, with an optional server, and updates for the app.

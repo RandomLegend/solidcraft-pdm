@@ -1477,8 +1477,9 @@ impl App {
                 }
                 ui.weak(backend.root().display().to_string());
                 ui.separator();
+                let (untracked, missing) = if backend.is_remote() { ("not on the server", "not downloaded") } else { ("untracked", "missing") };
                 ui.label(format!(
-                    "{} designs · {} modified · {} untracked · {} missing",
+                    "{} designs · {} modified · {} {untracked} · {} {missing}",
                     self.entries.len(),
                     self.count(Status::Modified),
                     self.count(Status::Untracked),
@@ -1502,10 +1503,16 @@ impl App {
             let total = self.entries.len();
             let mut view = self.view.clone();
             ui.selectable_value(&mut view, View::All, format!("All designs  ({total})"));
+            let remote = self.backend.as_ref().is_some_and(Backend::is_remote);
             for status in [Status::Modified, Status::Untracked, Status::Missing] {
                 let n = self.count(status);
                 if n > 0 || self.view == View::Status(status) {
-                    let (label, color) = status_style(status);
+                    let (label, color) = match (remote, status) {
+                        // In a workspace these are designs not fetched yet, or new ones of yours.
+                        (true, Status::Missing) => ("Not downloaded", Color32::from_rgb(120, 145, 185)),
+                        (true, Status::Untracked) => ("Not on the server", Color32::from_rgb(120, 145, 185)),
+                        _ => status_style(status),
+                    };
                     let text = RichText::new(format!("{label}  ({n})")).color(color);
                     ui.selectable_value(&mut view, View::Status(status), text);
                 }

@@ -1,6 +1,7 @@
 //! The README's screenshots (`docs/images/`), of a vault made from SolidCraft's own sample
-//! designs with thumbnails SolidCraft rendered. Run by `docs/make-screenshots.sh`; skipped
-//! unless `SCPDM_README_INPUT` (designs and renders) and `SCPDM_README_OUT` are set.
+//! designs with thumbnails SolidCraft rendered, and the same designs on a team server. Run by
+//! `docs/make-screenshots.sh`; skipped unless `SCPDM_README_INPUT` (designs and renders) and
+//! `SCPDM_README_OUT` are set.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -10,6 +11,7 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use scpdm_gui::app::App;
+use remote::{Client, Workspace};
 use vault::Vault;
 
 /// A design of the demo vault: where it goes, which sample it is (and its earlier version),
@@ -221,4 +223,91 @@ fn readme_screenshots() {
     let mut check = Vec::new();
     fs::File::open(out.join("vault.png")).unwrap().read_to_end(&mut check).unwrap();
     assert!(check.starts_with(b"\x89PNG"));
+}
+
+/// Writes a design into a workspace as SolidCraft saves it (a new file renamed over the old).
+fn save(ws: &Workspace, path: &str, bytes: &[u8]) {
+    let file = ws.absolute(path);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let tmp = file.with_extension("tmp");
+    fs::write(&tmp, bytes).unwrap();
+    fs::rename(&tmp, &file).unwrap();
+}
+
+fn described(bytes: &[u8], description: &str) -> Vec<u8> {
+    scformat::edit_document(bytes, |doc| doc["metadata"]["description"] = description.into()).unwrap()
+}
+
+/// The README's picture of the app on a team server: Anna's workspace, with designs Ben has
+/// checked out or changed, one she is changing, and one she has not fetched.
+#[test]
+fn readme_server_screenshot() {
+    let (Some(input), Some(out)) = (std::env::var_os("SCPDM_README_INPUT"), std::env::var_os("SCPDM_README_OUT")) else {
+        eprintln!("SCPDM_README_INPUT / SCPDM_README_OUT not set: skipped");
+        return;
+    };
+    let (input, out) = (PathBuf::from(input), PathBuf::from(out));
+    fs::create_dir_all(&out).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let server = scpdm_server::Server::open(&dir.path().join("server"), "Workshop server").unwrap();
+    server.add_vault("workshop").unwrap();
+    for user in ["anna", "ben"] {
+        server.accounts.add_user(user, &format!("{user}-password"), false).unwrap();
+        server.accounts.grant(user, "workshop", protocol::Access::Write).unwrap();
+    }
+    let url = scpdm_server::spawn_for_tests(server).replace("127.0.0.1", "localhost");
+    let login = |user: &str| {
+        let mut client = Client::new(&url, None);
+        client.login(user, &format!("{user}-password")).unwrap();
+        client
+    };
+
+    let mut ben = Workspace::create(&dir.path().join("ben"), login("ben"), "ben", "workshop").unwrap();
+    for demo in DEMO {
+        let path = format!("{}/{}.solidcraft", demo.folder, demo.file);
+        match demo.earlier {
+            Some((earlier, comment)) => {
+                save(&ben, &path, &prepared(&input, earlier, demo, "A"));
+                ben.add(&path, comment).unwrap();
+                ben.checkout(&path).unwrap();
+                save(&ben, &path, &prepared(&input, demo.source, demo, "A"));
+                ben.checkin(&path, demo.comment, false).unwrap();
+            }
+            None => {
+                save(&ben, &path, &prepared(&input, demo.source, demo, "A"));
+                ben.add(&path, demo.comment).unwrap();
+            }
+        }
+    }
+    let release = |path: &str| protocol::Action::Release { path: path.into(), revision: "A".into(), note: String::new() };
+    ben.act_on_design("Enclosures/pi4-case.solidcraft", release("Enclosures/pi4-case.solidcraft")).unwrap();
+    ben.act_on_design("Hardware/hinge.solidcraft", release("Hardware/hinge.solidcraft")).unwrap();
+
+    let root = dir.path().join("PDM").join("workshop");
+    let mut anna = Workspace::create(&root, login("anna"), "anna", "workshop").unwrap();
+    for demo in DEMO.iter().filter(|d| d.file != "logo") {
+        anna.get(&format!("{}/{}.solidcraft", demo.folder, demo.file)).unwrap();
+    }
+    // Ben: one design checked out, one changed since Anna fetched it.
+    ben.checkout("Experiments/cube-frame.solidcraft").unwrap();
+    let plate = "Hardware/mounting-plate.solidcraft";
+    ben.checkout(plate).unwrap();
+    save(&ben, plate, &described(&fs::read(ben.absolute(plate)).unwrap(), "Mounting plate, 6 x M3"));
+    ben.checkin(plate, "Hole pattern for M3", false).unwrap();
+    // Anna: working on the lid frame.
+    let lid = "Enclosures/pi4-lid-frame.solidcraft";
+    anna.checkout(lid).unwrap();
+    save(&anna, lid, &described(&fs::read(anna.absolute(lid)).unwrap(), "Lid frame, ribs 1.6 mm"));
+    drop(anna);
+
+    let start = root.clone();
+    let mut harness = Harness::builder()
+        .with_size([1400.0, 860.0])
+        .with_pixels_per_point(1.5)
+        .with_step_dt(1.0 / 60.0)
+        .build_eframe(move |cc| App::new(cc, Some(start)));
+    settle(&mut harness);
+    harness.state_mut().select(lid);
+    settle(&mut harness);
+    shot(&mut harness, &out, "server-app");
 }
