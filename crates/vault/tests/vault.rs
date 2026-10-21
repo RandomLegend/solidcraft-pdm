@@ -414,7 +414,10 @@ fn vaults_from_the_first_schema_are_upgraded() {
     drop(vault);
     // As the first version of the tool left it: no state, no releases, no settings.
     let db = rusqlite::Connection::open(dir.path().join(".pdm/vault.db")).unwrap();
-    db.execute_batch("DROP TABLE releases; DROP TABLE settings; ALTER TABLE documents DROP COLUMN state; PRAGMA user_version = 1;").unwrap();
+    db.execute_batch(
+        "DROP TABLE locks; DROP TABLE releases; DROP TABLE settings; ALTER TABLE documents DROP COLUMN state; PRAGMA user_version = 1;",
+    )
+    .unwrap();
     drop(db);
     let mut vault = Vault::open(dir.path()).unwrap();
     assert_eq!(vault.history(CASE).unwrap().len(), 1);
@@ -436,4 +439,61 @@ fn a_revision_set_by_hand_is_proposed_and_revisions_are_never_reused() {
     assert_eq!(vault.suggested_revision(CASE).unwrap(), "E", "after a release: the next one");
     assert!(matches!(vault.release_as(CASE, "d", ""), Err(Error::RevisionTaken(_, _))));
     assert!(dir.path().join(CASE).is_file());
+}
+
+#[test]
+fn check_outs_belong_to_one_user_and_follow_moves() {
+    let (_dir, mut vault) = linked_vault();
+    let part = "parts/lid.solidcraft";
+    let lock = vault.lock(part, "anna").unwrap();
+    assert_eq!(lock.user, "anna");
+    assert_eq!(vault.lock(part, "anna").unwrap(), lock, "again by the same user: fine");
+    assert!(matches!(vault.lock(part, "ben"), Err(Error::Locked(_, by)) if by == "anna"));
+    assert!(matches!(vault.unlock(part, "ben", false), Err(Error::Locked(_, _))));
+
+    vault.rename(part, "parts/cover.solidcraft").unwrap();
+    assert_eq!(vault.lock_of("parts/cover.solidcraft").unwrap().map(|l| l.user), Some("anna".into()));
+    assert_eq!(vault.locks().unwrap().len(), 1);
+
+    vault.unlock("parts/cover.solidcraft", "ben", true).unwrap(); // an administrator
+    assert_eq!(vault.lock_of("parts/cover.solidcraft").unwrap(), None);
+    assert!(matches!(vault.lock("parts/nothing.solidcraft", "anna"), Err(Error::NotTracked(_))));
+}
+
+#[test]
+fn a_server_vault_checks_in_bytes_and_serves_objects() {
+    let (dir, mut vault) = setup();
+    let v = vault.check_in_bytes("new/part.solidcraft", design("NEW", 1).as_bytes(), "from a workspace").unwrap();
+    assert_eq!(v.number, 1);
+    assert_eq!(fs::read_to_string(dir.path().join("new/part.solidcraft")).unwrap(), design("NEW", 1));
+    assert_eq!(vault.object(&v.hash).unwrap(), design("NEW", 1).as_bytes());
+
+    let hash = vault.put_object(b"uploaded").unwrap();
+    assert!(vault.has_object(&hash));
+    assert!(!vault.has_object("../../etc/passwd"));
+    assert!(matches!(vault.object("../../etc/passwd"), Err(Error::Corrupt(_))));
+    assert!(vault::is_hash(&hash) && !vault::is_hash(&hash.to_uppercase()));
+
+    let ids = vault.document_ids().unwrap();
+    vault.rename("new/part.solidcraft", "part.solidcraft").unwrap();
+    assert_eq!(vault.document_ids().unwrap()["part.solidcraft"], ids["new/part.solidcraft"], "ids survive moves");
+}
+
+#[test]
+fn a_move_tells_which_designs_it_would_change() {
+    let (_dir, vault) = linked_vault();
+    assert_eq!(vault.move_affects("parts/lid.solidcraft", "lid.solidcraft").unwrap(), ["asm/box.solidcraft"]);
+    assert!(vault.move_affects("asm/box.solidcraft", "box.solidcraft").unwrap().is_empty(), "only its own links");
+}
+
+#[test]
+fn vaults_from_the_second_schema_get_locks() {
+    let (dir, mut vault) = setup();
+    vault.check_in(CASE, "v1").unwrap();
+    drop(vault);
+    let db = rusqlite::Connection::open(dir.path().join(".pdm/vault.db")).unwrap();
+    db.execute_batch("DROP TABLE locks; PRAGMA user_version = 2;").unwrap();
+    drop(db);
+    let mut vault = Vault::open(dir.path()).unwrap();
+    assert_eq!(vault.lock(CASE, "anna").unwrap().user, "anna");
 }

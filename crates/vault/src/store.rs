@@ -50,6 +50,10 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn contains(&self, hash: &str) -> bool {
+        self.path(hash).is_file()
+    }
+
     /// Reads an object back, checking its hash.
     pub(crate) fn get(&self, hash: &str) -> Result<Vec<u8>> {
         let bytes = fs::read(self.path(hash)).map_err(|e| match e.kind() {

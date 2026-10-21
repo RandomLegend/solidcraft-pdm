@@ -15,6 +15,7 @@
 //! Single user for now: there is no check-out or locking.
 
 mod lifecycle;
+mod shared;
 mod store;
 
 use std::collections::{HashMap, HashSet};
@@ -26,11 +27,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub use lifecycle::{Lifecycle, Release, RevisionScheme, State, next_revision};
+pub use shared::{Lock, is_hash};
 pub use store::hash;
 use store::{Store, write_atomic};
 
 pub const PDM_DIR: &str = ".pdm";
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -74,6 +76,8 @@ pub enum Error {
     Design(String),
     #[error("{0} is longer than SolidCraft allows (4 KiB)")]
     TooLong(String),
+    #[error("{0} is checked out by {1}")]
+    Locked(String, String),
     #[error("vault store is damaged: {0}")]
     Corrupt(String),
 }
@@ -760,6 +764,19 @@ fn migrate(db: &Connection) -> Result<()> {
              COMMIT;",
         )?;
     }
+    if version < 3 {
+        // Check-outs (on a server's vaults): by document, so a lock follows a move.
+        db.execute_batch(
+            "BEGIN;
+             CREATE TABLE locks (
+                 document_id INTEGER PRIMARY KEY REFERENCES documents(id),
+                 user        TEXT NOT NULL,
+                 since       INTEGER NOT NULL
+             );
+             PRAGMA user_version = 3;
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -799,7 +816,7 @@ fn cached_hash(db: &Connection, path: &str, file: &Path, meta: &fs::Metadata) ->
 
 /// A vault path must be `name` or `folder/…/name`: no empty, `.`, `..` or hidden (`.pdm`)
 /// components, no backslashes.
-fn check_path(path: &str) -> Result<()> {
+pub(crate) fn check_path(path: &str) -> Result<()> {
     let ok = !path.is_empty()
         && !path.contains('\\')
         && path.split('/').all(|c| !c.is_empty() && !c.starts_with('.'));
