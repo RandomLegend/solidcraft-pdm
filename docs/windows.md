@@ -22,6 +22,14 @@ yet**. The development machine has no Windows toolchain. The first build on Wind
 The tests that use a shell script as a stand-in for SolidCraft are Unix-only and are skipped.
 The screenshot mode of the UI tests (`SCPDM_SCREENSHOTS`) needs a GPU adapter.
 
+## CI
+
+`.gitlab-ci.yml` builds and tests on gitlab.com's Windows runners (`saas-windows-medium-amd64`).
+It runs automatically on the default branch and on tags; on other branches you start it by hand
+in the pipeline view. The job installs Rust 1.93.1 with rustup. Its artifact
+`solidcraft-pdm-windows-<commit>` holds `solidcraft-pdm.exe` and `scpdm.exe` (kept 30 days).
+The Linux job runs the tests on every push.
+
 ## What is Windows-specific
 
 | Area | Windows behaviour | Where |
@@ -53,4 +61,4 @@ machine uses it at a time.
   may fail to open the window. eframe's `wgpu` backend (Direct3D 12) is the alternative if
   that happens.
 - **Still to do**: an `.exe` icon and version info (`winres`), an installer (MSI with
-  `cargo-wix`, or Inno Setup), and a CI job that builds on Windows for every change.
+  `cargo-wix`, or Inno Setup), and signing the `.exe` (Windows SmartScreen warns about unsigned downloads).
