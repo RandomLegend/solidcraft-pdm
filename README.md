@@ -27,7 +27,10 @@ CI on gitlab.com builds these (pipeline → job → *Browse* / *Download* artifa
   or **Missing** (tracked, but the file is gone).
 - **Restore** puts an earlier version back. It never loses work: changes not checked in yet are
   checked in first, and the restore itself is recorded as a new version.
-- **Move / rename** inside the PDM keeps the history. A file moved in the file manager is
+- **Move / rename** inside the PDM keeps the history, and updates the links: in designs that
+  link to the moved one, and the moved design's own relative links. An updated design that was
+  up to date gets a new version saying why; one with changes not checked in yet keeps them and
+  gets no version of its own. A file moved in the file manager is
   recognised by its content and can be relinked to its history.
 
 ## Desktop app
@@ -105,9 +108,12 @@ Tests: `cargo test --workspace`. The GUI test drives the real window over a demo
   - container: ZIP with `container.json`, `document.json`, `blobs/<sha256>.<ext>`, `cache/thumbnail.png`
   - `metadata`: `project`, `part_number`, `revision`, `author`, `organization`, `description`, `license`
   - `links`: component id → `{path, feature}`, the path relative to the design's folder
-- **Read-only towards design files.** SolidCraft lets other tools store data under their own
-  reverse-DNS `metadata` key and promises to keep it: the hook for writing PDM data into files
-  later, as a deliberate step.
+- **Careful writes to design files.** The PDM changes a design only for link updates and
+  property edits (`scformat::edit_document`): the other entries of a container are copied byte
+  for byte, key order and every number survive exactly, writes are atomic. SolidCraft's model
+  cache in a container then no longer matches and is rebuilt on the next open (a cache miss,
+  never an error). `crates/scformat/tests/solidcraft_cli.rs` has SolidCraft itself re-save what
+  the PDM wrote (set `SOLIDCRAFT_CLI` to an extracted AppImage's `usr/bin/solidcraft-cli`).
 - **Versions are whole-file copies, stored once per distinct content** (SHA-256, like SolidCraft's
   own blobs) and verified on read. Objects are read-only on disk.
 - **Single user.** No check-out or locking yet; SQLite runs in WAL mode so the app and the CLI
@@ -120,7 +126,7 @@ Tests: `cargo test --workspace`. The GUI test drives the real window over a demo
 1. ~~Read design files~~
 2. ~~Vault, versions, restore, move/relink~~
 3. ~~Desktop GUI~~
-4. Update links in other designs when a linked file is moved or renamed
+4. ~~Update links in other designs when a linked file is moved or renamed~~
 5. Compare two versions (properties, parameters, features)
 6. Lifecycle states (WIP → released) and a revision scheme; edit design properties
 7. Upgrade egui (0.33 → current), packaging (`.desktop` file, AppImage; Windows: first build, icon, installer, CI — see `docs/windows.md`)

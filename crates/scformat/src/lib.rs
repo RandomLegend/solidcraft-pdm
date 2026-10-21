@@ -192,6 +192,61 @@ pub fn read<R: Read + Seek>(mut source: R) -> Result<DesignInfo> {
     }
 }
 
+/// Changes a design's document (`document.json` of a container, or the plain JSON design) and
+/// returns the new file. Everything else is kept exactly: the other entries of a container are
+/// copied byte for byte, key order and every number (bit for bit) survive the round trip, and
+/// a plain JSON design keeps its pretty or compact layout.
+///
+/// SolidCraft's model cache and thumbnail key in a container record the hash of the old
+/// document, so they read as stale: SolidCraft rebuilds the model on the next open (a cache
+/// miss, never an error). The geometry is unchanged by the edits the PDM makes, so the
+/// thumbnail stays correct.
+pub fn edit_document(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Result<Vec<u8>> {
+    if bytes.len() as u64 > MAX_PART_BYTES {
+        return Err(Error::TooLarge("design"));
+    }
+    if bytes.starts_with(&ZIP_SIGNATURE) {
+        return edit_container(bytes, edit);
+    }
+    let mut doc: serde_json::Value = serde_json::from_slice(bytes)?;
+    edit(&mut doc);
+    let pretty = bytes.windows(2).take(4096).any(|w| w == b"\n ");
+    let mut out = if pretty { serde_json::to_vec_pretty(&doc)? } else { serde_json::to_vec(&doc)? };
+    if bytes.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    Ok(out)
+}
+
+fn edit_container(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Result<Vec<u8>> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    let mut doc: serde_json::Value = match zip.by_name("document.json") {
+        Ok(entry) => serde_json::from_slice(&read_bounded(entry, MAX_PART_BYTES, "document.json")?)?,
+        Err(zip::result::ZipError::FileNotFound) => return Err(Error::MissingPart("document.json")),
+        Err(e) => return Err(e.into()),
+    };
+    edit(&mut doc);
+    let document = serde_json::to_vec(&doc)?;
+
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::with_capacity(bytes.len())));
+    for i in 0..zip.len() {
+        let entry = zip.by_index_raw(i)?;
+        if entry.name() == "document.json" {
+            // As SolidCraft writes it: Deflate level 1.
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .compression_level(Some(1))
+                .last_modified_time(entry.last_modified().unwrap_or_default());
+            drop(entry);
+            out.start_file("document.json", options)?;
+            std::io::Write::write_all(&mut out, &document)?;
+        } else {
+            out.raw_copy_file(entry)?;
+        }
+    }
+    Ok(out.finish()?.into_inner())
+}
+
 fn read_container<R: Read + Seek>(source: R) -> Result<DesignInfo> {
     let mut zip = zip::ZipArchive::new(source)?;
 

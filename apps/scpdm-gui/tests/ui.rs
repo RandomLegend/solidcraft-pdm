@@ -532,3 +532,26 @@ fn new_design_from_a_right_click_in_the_list() {
     type_text(&mut harness, "gasket");
     harness.get_by_label("Creates assembly/gasket.solidcraft as v1");
 }
+
+#[test]
+fn moving_a_linked_part_updates_the_assembly() {
+    let (_dir, root, mut harness) = open_demo();
+    let from = harness.get_by_label("pi4-lid.solidcraft").rect().center();
+    let to = harness.get_by_label("parts  (2)").rect().center();
+    harness.hover_at(from);
+    harness.drag_at(from);
+    harness.step();
+    for i in 1..=8 {
+        harness.hover_at(from + (to - from) * (i as f32 / 8.0));
+        harness.step();
+    }
+    harness.drop_at(to);
+    settle(&mut harness);
+
+    let links = scformat::read_file(root.join("assembly/pi4-enclosure.solidcraft")).unwrap().links;
+    let paths: Vec<&str> = links.iter().map(|l| l.path.as_str()).collect();
+    assert!(paths.contains(&"../parts/pi4-lid.solidcraft"), "{paths:?}");
+    harness.get_by_label_contains("links updated in assembly/pi4-enclosure.solidcraft (v2)");
+    let history = Vault::open(&root).unwrap().history("assembly/pi4-enclosure.solidcraft").unwrap();
+    assert_eq!(history[0].comment, "Link to parts/pi4-lid.solidcraft updated (moved from enclosure/pi4-lid.solidcraft)");
+}

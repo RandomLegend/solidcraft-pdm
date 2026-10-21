@@ -133,3 +133,75 @@ fn new_designs_read_back() {
     assert_eq!(info.metadata.description, None, "empty values are left out");
     assert_eq!(info.feature_count, 0);
 }
+
+const TRICKY: &str = r#"{
+  "format": "solidcraft/29",
+  "name": "bracket",
+  "params": [{"name": "w", "value": 0.1}, {"name": "z", "value": -0.0}, {"name": "tiny", "value": 1e-300},
+             {"name": "long", "value": 123456789.12345679}, {"name": "third", "value": 0.30000000000000004}],
+  "next_id": 18446744073709551615,
+  "zeta": 1,
+  "alpha": 2,
+  "links": {"3": {"path": "../parts/lid.solidcraft", "feature": 7}}
+}
+"#;
+
+fn set_link(doc: &mut serde_json::Value) {
+    doc["links"]["3"]["path"] = "lid.solidcraft".into();
+}
+
+#[test]
+fn editing_plain_json_keeps_everything_else_exactly() {
+    let out = scformat::edit_document(TRICKY.as_bytes(), set_link).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let before: serde_json::Value = serde_json::from_str(TRICKY).unwrap();
+    let after: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for (i, p) in before["params"].as_array().unwrap().iter().enumerate() {
+        let (a, b) = (p["value"].as_f64().unwrap(), after["params"][i]["value"].as_f64().unwrap());
+        assert_eq!(a.to_bits(), b.to_bits(), "{} changed: {a} -> {b}", p["name"]);
+    }
+    assert_eq!(after["next_id"].as_u64(), Some(u64::MAX));
+    let keys: Vec<&str> = after.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["format", "name", "params", "next_id", "zeta", "alpha", "links"], "key order kept");
+    assert_eq!(after["links"]["3"]["path"], "lid.solidcraft");
+    assert_eq!(after["links"]["3"]["feature"], 7);
+    assert!(text.contains("\n  \"name\""), "pretty layout kept");
+    assert!(text.ends_with('\n'));
+}
+
+#[test]
+fn editing_a_container_copies_the_other_entries_byte_for_byte() {
+    let blob: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
+    let png = b"\x89PNG\r\n\x1a\nthumbnail";
+    let original = container(&[
+        ("container.json", CONTAINER_JSON),
+        ("document.json", TRICKY.as_bytes()),
+        ("blobs/ab.mesh", &blob),
+        ("cache/thumbnail.png", png),
+    ])
+    .into_inner();
+    let edited = scformat::edit_document(&original, set_link).unwrap();
+
+    let info = scformat::read(Cursor::new(edited.clone())).unwrap();
+    assert_eq!(info.links[0].path, "lid.solidcraft");
+    assert_eq!(info.thumbnail_png.as_deref(), Some(&png[..]));
+    let mut before = zip::ZipArchive::new(Cursor::new(original)).unwrap();
+    let mut after = zip::ZipArchive::new(Cursor::new(edited)).unwrap();
+    let names = |z: &zip::ZipArchive<Cursor<Vec<u8>>>| z.file_names().map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(names(&before), names(&after));
+    for name in ["container.json", "blobs/ab.mesh", "cache/thumbnail.png"] {
+        let read = |z: &mut zip::ZipArchive<Cursor<Vec<u8>>>| {
+            let mut v = Vec::new();
+            std::io::Read::read_to_end(&mut z.by_name(name).unwrap(), &mut v).unwrap();
+            v
+        };
+        assert_eq!(read(&mut before), read(&mut after), "{name}");
+    }
+}
+
+#[test]
+fn editing_refuses_what_is_not_a_design() {
+    assert!(scformat::edit_document(b"not json", |_| {}).is_err());
+    let no_doc = container(&[("container.json", CONTAINER_JSON)]).into_inner();
+    assert!(matches!(scformat::edit_document(&no_doc, |_| {}), Err(Error::MissingPart("document.json"))));
+}

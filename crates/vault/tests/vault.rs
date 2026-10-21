@@ -171,10 +171,10 @@ fn folders_can_be_created_listed_and_removed() {
     assert_eq!(vault.folders().unwrap(), ["archive", "archive/2026", "enclosure"]);
     assert!(matches!(vault.create_folder("archive"), Err(Error::Exists(_))));
 
-    let moved = vault.move_to_folder(CASE, "archive/2026").unwrap();
+    let moved = vault.move_to_folder(CASE, "archive/2026").unwrap().to;
     assert_eq!(moved, "archive/2026/case.solidcraft");
     assert!(matches!(vault.remove_folder("archive/2026"), Err(Error::FolderNotEmpty(_))));
-    assert_eq!(vault.move_to_folder(&moved, "").unwrap(), "case.solidcraft");
+    assert_eq!(vault.move_to_folder(&moved, "").unwrap().to, "case.solidcraft");
     vault.remove_folder("archive/2026").unwrap();
     assert_eq!(vault.folders().unwrap(), ["archive", "enclosure"]);
 }
@@ -213,6 +213,112 @@ fn reference_images_are_listed_but_not_versioned() {
     assert_eq!(images, ["enclosure/case-ref.JPG", "sketch.webp"]);
     assert_eq!(vault.scan().unwrap().len(), 1, "scan lists designs only");
     // They move like designs.
-    assert_eq!(vault.move_to_folder("sketch.webp", "enclosure").unwrap(), "enclosure/sketch.webp");
+    assert_eq!(vault.move_to_folder("sketch.webp", "enclosure").unwrap().to, "enclosure/sketch.webp");
     assert!(dir.path().join("enclosure/sketch.webp").is_file());
+}
+
+/// A design linking components 2 and 5 to other design files.
+fn assembly(links: &[(u64, &str)]) -> String {
+    let links: Vec<String> = links.iter().map(|(c, p)| format!(r#""{c}": {{"path": "{p}", "feature": 1}}"#)).collect();
+    format!(
+        r#"{{"format": "solidcraft/29", "name": "asm", "units": "mm", "features": [{{"id": 1, "w": 0.1}}],
+            "components": [{{"id": 2, "name": "Lid", "parent": 0}}, {{"id": 5, "name": "Base", "parent": 0}}],
+            "links": {{{}}}}}"#,
+        links.join(", ")
+    )
+}
+
+fn links_of(dir: &Path, path: &str) -> Vec<(u64, String)> {
+    scformat::read_file(dir.join(path)).unwrap().links.into_iter().map(|l| (l.component, l.path)).collect()
+}
+
+fn linked_vault() -> (tempfile::TempDir, Vault) {
+    let dir = tempfile::tempdir().unwrap();
+    for d in ["asm", "parts"] {
+        fs::create_dir_all(dir.path().join(d)).unwrap();
+    }
+    fs::write(dir.path().join("parts/lid.solidcraft"), design("LID", 1)).unwrap();
+    fs::write(dir.path().join("parts/base.solidcraft"), design("BASE", 1)).unwrap();
+    fs::write(dir.path().join("asm/box.solidcraft"), assembly(&[(2, "../parts/lid.solidcraft"), (5, "../parts/base.solidcraft")])).unwrap();
+    let mut vault = Vault::init(dir.path()).unwrap();
+    for e in vault.scan().unwrap() {
+        vault.check_in(&e.path, "v1").unwrap();
+    }
+    (dir, vault)
+}
+
+#[test]
+fn moving_a_part_updates_the_assemblies_that_link_to_it() {
+    let (dir, mut vault) = linked_vault();
+    let report = vault.rename("parts/lid.solidcraft", "archive/2026/lid-old.solidcraft").unwrap();
+    assert_eq!(report.updated, [vault::LinkUpdate { path: "asm/box.solidcraft".into(), version: Some(2) }]);
+    assert!(report.failed.is_empty());
+    assert_eq!(links_of(dir.path(), "asm/box.solidcraft"), [(2, "../archive/2026/lid-old.solidcraft".into()), (5, "../parts/base.solidcraft".into())]);
+    let history = vault.history("asm/box.solidcraft").unwrap();
+    assert_eq!(history[0].comment, "Link to archive/2026/lid-old.solidcraft updated (moved from parts/lid.solidcraft)");
+    // The part itself has no links: moved, not changed.
+    assert_eq!(vault.history("archive/2026/lid-old.solidcraft").unwrap().len(), 1);
+    // Everything else in the assembly is as it was.
+    let doc: serde_json::Value = serde_json::from_slice(&fs::read(dir.path().join("asm/box.solidcraft")).unwrap()).unwrap();
+    assert_eq!(doc["features"][0]["w"].as_f64(), Some(0.1));
+    assert_eq!(doc["components"][1]["name"], "Base");
+}
+
+#[test]
+fn a_moved_assembly_keeps_its_own_links_working() {
+    let (dir, mut vault) = linked_vault();
+    let report = vault.move_to_folder("asm/box.solidcraft", "").unwrap();
+    assert_eq!(report.to, "box.solidcraft");
+    assert_eq!(report.updated.len(), 1);
+    assert_eq!(links_of(dir.path(), "box.solidcraft"), [(2, "parts/lid.solidcraft".into()), (5, "parts/base.solidcraft".into())]);
+    assert_eq!(vault.history("box.solidcraft").unwrap()[0].comment, "Links updated after moving from asm/box.solidcraft");
+    let statuses: Vec<_> = vault.scan().unwrap().into_iter().map(|e| e.status).collect();
+    assert!(statuses.iter().all(|s| *s == Status::Current), "{statuses:?}");
+}
+
+#[test]
+fn unsaved_changes_are_kept_and_not_checked_in() {
+    let (dir, mut vault) = linked_vault();
+    let asm = dir.path().join("asm/box.solidcraft");
+    let edited = assembly(&[(2, "../parts/lid.solidcraft"), (5, "../parts/base.solidcraft")]).replace("\"asm\"", "\"asm-edited\"");
+    fs::write(&asm, edited).unwrap();
+    let report = vault.rename("parts/base.solidcraft", "parts/base-v2.solidcraft").unwrap();
+    assert_eq!(report.updated, [vault::LinkUpdate { path: "asm/box.solidcraft".into(), version: None }]);
+    assert_eq!(scformat::read_file(&asm).unwrap().name.as_deref(), Some("asm-edited"), "the user's change survives");
+    assert_eq!(links_of(dir.path(), "asm/box.solidcraft")[1].1, "../parts/base-v2.solidcraft");
+    assert_eq!(vault.history("asm/box.solidcraft").unwrap().len(), 1, "no version for the user's unsaved work");
+}
+
+#[test]
+fn links_in_containers_are_updated_too() {
+    let (dir, mut vault) = linked_vault();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let blob: Vec<u8> = (0..=255u8).cycle().take(5000).collect();
+    for (name, bytes) in [
+        ("container.json", &br#"{"format":"solidcraft-container/1"}"#[..]),
+        ("document.json", assembly(&[(2, "../parts/lid.solidcraft")]).as_bytes()),
+        ("blobs/aa.mesh", &blob[..]),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut zip, bytes).unwrap();
+    }
+    fs::write(dir.path().join("asm/packed.solidcraft"), zip.finish().unwrap().into_inner()).unwrap();
+    vault.check_in("asm/packed.solidcraft", "v1").unwrap();
+
+    vault.rename("parts/lid.solidcraft", "lid.solidcraft").unwrap();
+    assert_eq!(links_of(dir.path(), "asm/packed.solidcraft"), [(2, "../lid.solidcraft".into())]);
+    let mut packed = zip::ZipArchive::new(fs::File::open(dir.path().join("asm/packed.solidcraft")).unwrap()).unwrap();
+    let mut kept = Vec::new();
+    std::io::Read::read_to_end(&mut packed.by_name("blobs/aa.mesh").unwrap(), &mut kept).unwrap();
+    assert_eq!(kept, blob);
+}
+
+#[test]
+fn renaming_in_place_updates_links_and_images_just_move() {
+    let (dir, mut vault) = linked_vault();
+    vault.rename("parts/lid.solidcraft", "parts/cover.solidcraft").unwrap();
+    assert_eq!(links_of(dir.path(), "asm/box.solidcraft")[0].1, "../parts/cover.solidcraft");
+    fs::write(dir.path().join("parts/ref.png"), b"png").unwrap();
+    let report = vault.rename("parts/ref.png", "asm/ref.png").unwrap();
+    assert!(report.updated.is_empty());
 }

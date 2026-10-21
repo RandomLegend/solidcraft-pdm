@@ -322,8 +322,10 @@ impl Vault {
         version.thumbnail.as_deref().map(|h| self.store.get(h)).transpose()
     }
 
-    /// Moves or renames a file inside the vault, keeping its history.
-    pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
+    /// Moves or renames a file inside the vault, keeping its history. For a design, the links
+    /// that point at it from other designs, and its own relative links, are updated so they
+    /// still lead to the same files (see [`MoveReport`]).
+    pub fn rename(&mut self, from: &str, to: &str) -> Result<MoveReport> {
         check_path(to)?;
         let (src, dst) = (self.absolute(from), self.absolute(to));
         if !src.is_file() {
@@ -332,24 +334,111 @@ impl Vault {
         if dst.exists() || self.document_id(to)?.is_some() {
             return Err(Error::Exists(to.to_owned()));
         }
+        // Worked out before the move, while every link still resolves.
+        let plan = if is_design(&src) { self.link_changes(from, to)? } else { Vec::new() };
+        let mut current = Vec::new();
+        for change in &plan {
+            current.push(self.is_current(&change.design)?);
+        }
+
         if let Some(dir) = dst.parent() {
             fs::create_dir_all(dir)?;
         }
         fs::rename(&src, &dst)?;
         self.db.execute("UPDATE documents SET path = ?2 WHERE path = ?1", params![from, to])?;
         self.db.execute("DELETE FROM stat_cache WHERE path = ?1", [from])?;
-        Ok(())
+
+        let mut report = MoveReport { to: to.to_owned(), updated: Vec::new(), failed: Vec::new() };
+        for (change, was_current) in plan.into_iter().zip(current) {
+            let path = if change.design == from { to.to_owned() } else { change.design.clone() };
+            match self.rewrite_links(&path, &change.paths) {
+                Ok(()) => {
+                    let comment = if path == to {
+                        format!("Links updated after moving from {from}")
+                    } else {
+                        format!("Link to {to} updated (moved from {from})")
+                    };
+                    // Only a design without unsaved changes gets a version; otherwise the
+                    // edit joins those changes and is checked in with them.
+                    let version = if was_current { Some(self.check_in(&path, &comment)?.number) } else { None };
+                    report.updated.push(LinkUpdate { path, version });
+                }
+                Err(e) => report.failed.push((path, e.to_string())),
+            }
+        }
+        Ok(report)
     }
 
-    /// Moves a design into `folder` ("" for the top level), keeping its name and history.
-    /// Returns the new path.
-    pub fn move_to_folder(&mut self, path: &str, folder: &str) -> Result<String> {
+    /// Moves a file into `folder` ("" for the top level), keeping its name and history, and
+    /// updating links like [`Vault::rename`].
+    pub fn move_to_folder(&mut self, path: &str, folder: &str) -> Result<MoveReport> {
         let name = path.rsplit_once('/').map_or(path, |(_, n)| n);
         let to = if folder.is_empty() { name.to_owned() } else { format!("{folder}/{name}") };
-        if to != path {
-            self.rename(path, &to)?;
+        if to == path {
+            return Ok(MoveReport { to, updated: Vec::new(), failed: Vec::new() });
         }
-        Ok(to)
+        self.rename(path, &to)
+    }
+
+    /// The link paths to change when the design `from` moves to `to`: in designs linking to it,
+    /// and in `from` itself (its relative links start from its folder).
+    fn link_changes(&self, from: &str, to: &str) -> Result<Vec<LinkChange>> {
+        let (from_abs, to_abs) = (self.absolute(from), self.absolute(to));
+        let mut files = Vec::new();
+        find_designs(&self.root, &mut files)?;
+        let mut changes = Vec::new();
+        for file in files {
+            let Some(design) = vault_path(&self.root, &file) else { continue };
+            let Ok(info) = scformat::read_file(&file) else { continue }; // not a readable design
+            let is_moved = design == from;
+            let dir = file.parent().unwrap_or(&self.root).to_path_buf();
+            let new_dir = if is_moved { to_abs.parent().unwrap_or(&self.root).to_path_buf() } else { dir.clone() };
+            let mut paths = Vec::new();
+            for link in &info.links {
+                let stored = Path::new(&link.path);
+                let target = normalize(&dir.join(stored));
+                let points_at_moved = target == from_abs;
+                if !points_at_moved && !is_moved {
+                    continue;
+                }
+                let new_target = if points_at_moved { to_abs.clone() } else { target };
+                let new_path = if stored.is_absolute() {
+                    new_target.to_string_lossy().into_owned()
+                } else {
+                    relative_path(&new_dir, &new_target)
+                };
+                if new_path != link.path {
+                    paths.push((link.component, new_path));
+                }
+            }
+            if !paths.is_empty() {
+                changes.push(LinkChange { design, paths });
+            }
+        }
+        Ok(changes)
+    }
+
+    /// Writes new link paths (by component id) into a design file.
+    fn rewrite_links(&self, path: &str, paths: &[(u64, String)]) -> Result<()> {
+        let file = self.absolute(path);
+        let bytes = fs::read(&file)?;
+        let edited = scformat::edit_document(&bytes, |doc| {
+            for (component, new_path) in paths {
+                if let Some(link) = doc.get_mut("links").and_then(|l| l.get_mut(component.to_string())) {
+                    link["path"] = serde_json::Value::String(new_path.clone());
+                }
+            }
+        })
+        .map_err(|e| Error::Corrupt(format!("{path}: {e}")))?;
+        let perms = fs::metadata(&file).ok().map(|m| m.permissions());
+        write_atomic(&file, &edited, perms.as_ref())
+    }
+
+    /// Whether a tracked file has exactly its latest version's content.
+    fn is_current(&self, path: &str) -> Result<bool> {
+        let Some(doc) = self.document_id(path)? else { return Ok(false) };
+        let Some(latest) = self.latest(doc)? else { return Ok(false) };
+        Ok(fs::read(self.absolute(path)).is_ok_and(|bytes| hash(&bytes) == latest.hash))
     }
 
     /// Creates a folder (and missing parents).
@@ -664,6 +753,40 @@ fn find_files(dir: &Path, wanted: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>
         }
     }
     Ok(())
+}
+
+/// What a move did to links (see [`Vault::rename`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MoveReport {
+    /// Where the file is now.
+    pub to: String,
+    /// Designs whose links were updated, with the version that records it (none when the design
+    /// had changes not checked in yet: the edit is part of those now).
+    pub updated: Vec<LinkUpdate>,
+    /// Designs whose links could not be updated, and why.
+    pub failed: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkUpdate {
+    pub path: String,
+    pub version: Option<u32>,
+}
+
+/// New link paths for one design, by component id.
+struct LinkChange {
+    design: String,
+    paths: Vec<(u64, String)>,
+}
+
+/// `target` relative to the folder `dir`, `/` separated, as SolidCraft stores links.
+fn relative_path(dir: &Path, target: &Path) -> String {
+    let dir: Vec<_> = dir.components().collect();
+    let target: Vec<_> = target.components().collect();
+    let common = dir.iter().zip(&target).take_while(|(a, b)| a == b).count();
+    let ups = std::iter::repeat_n("..".to_owned(), dir.len() - common);
+    let downs = target[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned());
+    ups.chain(downs).collect::<Vec<_>>().join("/")
 }
 
 /// A file in the vault that is shown but not versioned (a reference image).

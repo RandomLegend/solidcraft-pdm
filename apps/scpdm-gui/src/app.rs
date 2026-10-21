@@ -573,8 +573,8 @@ impl App {
                 let Some(vault) = &mut self.vault else { return };
                 let to = typed_path(&to);
                 match vault.rename(&from, &to) {
-                    Ok(()) => {
-                        self.info_msg(format!("Moved {from} to {to}"));
+                    Ok(report) => {
+                        self.report_move(&from, &to, &report);
                         self.selected = Some(to);
                         self.load_history();
                         self.start_scan(ctx);
@@ -691,19 +691,14 @@ impl App {
                 }
             }
             Action::MoveToFolder { path, folder } => {
-                let users = self.used_in(&path).len();
                 let Some(vault) = &mut self.vault else { return };
                 match vault.move_to_folder(&path, &folder) {
-                    Ok(to) if to == path => {}
-                    Ok(to) => {
+                    Ok(report) if report.to == path => {}
+                    Ok(report) => {
                         let place = if folder.is_empty() { "the top level".to_owned() } else { folder };
-                        let mut msg = format!("Moved {path} to {place}");
-                        if users > 0 {
-                            msg.push_str(&format!(" ({users} designs link to it by path; reopen and relink them in SolidCraft)"));
-                        }
-                        self.info_msg(msg);
+                        self.report_move(&path, &place, &report);
                         if self.selected.as_deref() == Some(path.as_str()) {
-                            self.selected = Some(to);
+                            self.selected = Some(report.to);
                         }
                         self.load_history();
                         self.start_scan(ctx);
@@ -711,6 +706,28 @@ impl App {
                     Err(e) => self.error(e),
                 }
             }
+        }
+    }
+
+    /// The status line after a move: where to, and what happened to links.
+    fn report_move(&mut self, from: &str, place: &str, report: &vault::MoveReport) {
+        let mut msg = format!("Moved {from} to {place}");
+        if !report.updated.is_empty() {
+            let names: Vec<String> = report
+                .updated
+                .iter()
+                .map(|u| match u.version {
+                    Some(v) => format!("{} (v{v})", u.path),
+                    None => format!("{} (with your unsaved changes)", u.path),
+                })
+                .collect();
+            msg.push_str(&format!("; links updated in {}", names.join(", ")));
+        }
+        if report.failed.is_empty() {
+            self.info_msg(msg);
+        } else {
+            let failed: Vec<String> = report.failed.iter().map(|(p, e)| format!("{p}: {e}")).collect();
+            self.error(format!("{msg}; links NOT updated in {}", failed.join("; ")));
         }
     }
 
@@ -1571,7 +1588,7 @@ impl App {
                     ui.label("New path in the vault (folders are created as needed):");
                     let edit = ui.add(egui::TextEdit::singleline(to).desired_width(f32::INFINITY));
                     ui.label(
-                        RichText::new("Designs that link to this file by path are not updated yet.")
+                        RichText::new("Links to it from other designs are updated, and so are its own. If one of them is open in SolidCraft, reopen it there afterwards.")
                             .small()
                             .color(ui.visuals().warn_fg_color),
                     );

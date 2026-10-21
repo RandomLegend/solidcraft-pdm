@@ -133,8 +133,17 @@ fn run(command: Command) -> Result {
         Command::Mv { from, to } => {
             let mut vault = Vault::discover(".")?;
             let (from, to) = (vault.relative(&from)?, vault.relative(&to)?);
-            vault.rename(&from, &to)?;
+            let report = vault.rename(&from, &to)?;
             println!("{from} → {to}");
+            for u in &report.updated {
+                match u.version {
+                    Some(v) => println!("  links updated in {} (v{v})", u.path),
+                    None => println!("  links updated in {} (joins its changes not checked in yet)", u.path),
+                }
+            }
+            for (path, e) in &report.failed {
+                eprintln!("  links NOT updated in {path}: {e}");
+            }
             Ok(())
         }
         Command::Relink { missing, to } => {
