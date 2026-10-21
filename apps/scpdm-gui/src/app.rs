@@ -1242,7 +1242,8 @@ impl App {
 
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             ui.add_space(6.0);
-            let preview = thumbnail(ui, image, THUMB, egui::Sense::click());
+            let drawn = thumbnail(ui, image, THUMB, egui::Sense::hover());
+            let preview = clickable(ui, drawn, "preview");
             if entry.status != Status::Missing && preview.on_hover_text("Double-click to open in SolidCraft").double_clicked() {
                 actions.push(Action::Open(entry.path.clone()));
             }
@@ -1366,7 +1367,8 @@ impl App {
                 Some((w, h)) => (width * h as f32 / w as f32).min(360.0),
                 None => width / THUMB_ASPECT,
             };
-            let preview = thumbnail(ui, picture, egui::vec2(width, height), egui::Sense::click());
+            let drawn = thumbnail(ui, picture, egui::vec2(width, height), egui::Sense::hover());
+            let preview = clickable(ui, drawn, "image-preview");
             if preview.on_hover_text("Double-click to open").double_clicked() {
                 actions.push(Action::OpenFile(path.clone()));
             }
@@ -1757,7 +1759,8 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// Everything that is not drawing: scans, rescans, settings, shortcuts.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_scan(ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if self.vault.is_some() && focused && (!self.focused || self.last_scan.elapsed() >= RESCAN_EVERY) {
@@ -1775,27 +1778,30 @@ impl eframe::App for App {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             self.focus_search = true;
         }
+    }
 
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         let mut actions = Vec::new();
-        egui::TopBottomPanel::top("top").show(ctx, |ui| self.top_bar(ui, &mut actions));
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| self.status_bar(ui));
+        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui, &mut actions));
+        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         if self.vault.is_some() {
-            egui::SidePanel::left("folders")
-                .default_width(220.0)
-                .min_width(150.0)
-                .show(ctx, |ui| self.left_panel(ui, &mut actions));
-            egui::SidePanel::right("details")
-                .default_width(360.0)
-                .min_width(280.0)
-                .show(ctx, |ui| self.details(ui, &mut actions));
-            egui::CentralPanel::default().show(ctx, |ui| self.list(ui, &mut actions));
+            egui::Panel::left("folders")
+                .default_size(220.0)
+                .min_size(150.0)
+                .show(ui, |ui| self.left_panel(ui, &mut actions));
+            egui::Panel::right("details")
+                .default_size(360.0)
+                .min_size(280.0)
+                .show(ui, |ui| self.details(ui, &mut actions));
+            egui::CentralPanel::default().show(ui, |ui| self.list(ui, &mut actions));
         } else {
-            egui::CentralPanel::default().show(ctx, |ui| self.welcome(ui, &mut actions));
+            egui::CentralPanel::default().show(ui, |ui| self.welcome(ui, &mut actions));
         }
-        self.dialogs(ctx, &mut actions);
-        drag_label(ctx);
+        self.dialogs(&ctx, &mut actions);
+        drag_label(&ctx);
         for action in actions {
-            self.apply(ctx, action);
+            self.apply(&ctx, action);
         }
     }
 
@@ -1872,6 +1878,12 @@ fn thumbnail(ui: &mut egui::Ui, image: Option<egui::Image<'static>>, size: egui:
             response
         }
     }
+}
+
+/// A click area over an already drawn widget. Registered after it, so it is on top: the details
+/// panel's scroll area would otherwise take the clicks of a widget that senses them itself.
+fn clickable(ui: &egui::Ui, drawn: egui::Response, id: &str) -> egui::Response {
+    ui.interact(drawn.rect, ui.id().with(id), egui::Sense::click())
 }
 
 /// How a version in the history relates to the working file.

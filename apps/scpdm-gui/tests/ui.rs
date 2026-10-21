@@ -378,6 +378,7 @@ fn after_a_restore_only_the_newest_version_is_the_working_file() {
     // Double-clicks: the preview and the working version open the file, v2 a read-only copy.
     let file = root.join("enclosure/pi4-lid.solidcraft").display().to_string();
     let path = harness.get_by_label("enclosure/pi4-lid.solidcraft").rect(); // under the heading, under the preview
+    harness.run_steps(60); // a second after clicking Properties, or egui counts a triple click
     double_click_at(&mut harness, egui::pos2(path.left() + 100.0, path.top() - 90.0));
     harness.run_steps(60);
     let v3 = harness.get_by_label("Restored v1").rect().center();

@@ -19,7 +19,7 @@ fn main() -> eframe::Result {
         // Hyprland sends none while it has nothing to redraw, so a repaint while the window is
         // unfocused could block the event loop, the ping went unanswered and Hyprland reported
         // the app as not responding. egui only repaints on demand, so vsync buys nothing here.
-        vsync: false,
+        glow_options: eframe::egui_glow::GlowConfiguration { vsync: false, ..Default::default() },
         ..Default::default()
     };
     eframe::run_native(
