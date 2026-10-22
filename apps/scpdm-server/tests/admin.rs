@@ -249,3 +249,39 @@ fn check_outs_can_be_made_optional_per_vault() {
     let mut r = s.agent.get(&format!("{}/api/vaults/workshop/tree", s.url)).header("Authorization", &format!("Bearer {ben}")).call().unwrap();
     assert_eq!(r.body_mut().read_json::<Value>().unwrap()["checkout_required"].as_bool(), Some(false));
 }
+
+#[test]
+fn deleted_designs_are_listed_restored_and_removed() {
+    let s = setup();
+    let cookie = cookie_pair(&s.page_login("root", "root-password").1.unwrap());
+    let ben = s.app_login("ben", "ben-password");
+    let act = |action: Action| {
+        let name = serde_json::to_value(&action).unwrap()["action"].as_str().unwrap().to_owned();
+        s.agent.post(&format!("{}/api/vaults/workshop/{name}", s.url)).header("Authorization", &format!("Bearer {ben}")).send_json(&action).unwrap().status().as_u16()
+    };
+    // Ben has it checked out (setup); give it back, then delete it.
+    assert_eq!(act(Action::UndoCheckout { path: "parts/lid.solidcraft".into(), force: false }), 200);
+    assert_eq!(act(Action::Delete { path: "parts/lid.solidcraft".into() }), 200);
+
+    let (_, d) = s.get(&cookie, "/api/admin/deleted");
+    assert_eq!(d["keep_days"].as_u64(), Some(7));
+    let item = &d["items"][0];
+    assert_eq!((item["path"].as_str(), item["deleted_by"].as_str(), item["vault"].as_str()), (Some("parts/lid.solidcraft"), Some("ben"), Some("workshop")));
+    assert_eq!(item["purge_at"].as_i64().unwrap() - item["deleted_at"].as_i64().unwrap(), 7 * 86400);
+    let (_, o) = s.get(&cookie, "/api/admin/overview");
+    assert_eq!(o["totals"]["designs"].as_u64(), Some(0), "not counted while deleted");
+
+    assert_eq!(s.send(&cookie, "PUT", "/api/admin/deleted/settings", json!({"keep_days": 0}), true), 400);
+    assert_eq!(s.send(&cookie, "PUT", "/api/admin/deleted/settings", json!({"keep_days": 14}), true), 204);
+    let id = item["id"].as_i64().unwrap();
+    assert_eq!(s.send(&cookie, "POST", &format!("/api/admin/vaults/workshop/deleted/{id}/restore"), json!({}), false), 403, "needs the header");
+    assert_eq!(s.send(&cookie, "POST", &format!("/api/admin/vaults/workshop/deleted/{id}/restore"), json!({}), true), 200);
+    let (_, o) = s.get(&cookie, "/api/admin/overview");
+    assert_eq!(o["totals"]["designs"].as_u64(), Some(1), "back");
+
+    assert_eq!(act(Action::Delete { path: "parts/lid.solidcraft".into() }), 200);
+    let (_, d) = s.get(&cookie, "/api/admin/deleted");
+    let id = d["items"][0]["id"].as_i64().unwrap();
+    assert_eq!(s.delete(&cookie, &format!("/api/admin/vaults/workshop/deleted/{id}")), 204);
+    assert_eq!(s.get(&cookie, "/api/admin/deleted").1["items"].as_array().unwrap().len(), 0);
+}

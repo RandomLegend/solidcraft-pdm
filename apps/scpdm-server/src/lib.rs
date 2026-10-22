@@ -13,6 +13,7 @@
 pub mod accounts;
 mod admin;
 pub mod backup;
+mod trash;
 mod api;
 
 use std::collections::HashMap;
@@ -108,6 +109,10 @@ impl Server {
     }
 }
 
+pub(crate) fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
 /// Serves the API on `listener` until `shutdown` resolves.
 pub async fn serve(
     server: Arc<Server>,
@@ -115,8 +120,10 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let schedule = tokio::spawn(backup::schedule(server.clone()));
+    let cleanup = tokio::spawn(trash::schedule(server.clone()));
     let result = axum::serve(listener, api::router(server)).with_graceful_shutdown(shutdown).await;
     schedule.abort();
+    cleanup.abort();
     result
 }
 

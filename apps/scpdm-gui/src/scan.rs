@@ -28,6 +28,8 @@ pub struct Scan {
     pub offline: Option<String>,
     /// Moves by others that the workspace followed.
     pub followed_moves: Vec<(String, String)>,
+    /// Designs deleted on the server whose unchanged copies were removed here.
+    pub followed_deletes: Vec<String>,
 }
 
 /// A workspace file and the server.
@@ -65,7 +67,7 @@ pub fn spawn(root: PathBuf, known: HashSet<String>, ctx: eframe::egui::Context) 
                 let info = scformat::read_file(vault.absolute(&e.path)).map_err(|e| e.to_string());
                 infos.insert(hash.clone(), Arc::new(info));
             }
-            Ok::<_, vault::Error>(Scan { entries, folders, images, image_thumbs, infos, remote: HashMap::new(), offline: None, followed_moves: Vec::new() })
+            Ok::<_, vault::Error>(Scan { entries, folders, images, image_thumbs, infos, remote: HashMap::new(), offline: None, followed_moves: Vec::new(), followed_deletes: Vec::new() })
         })();
         let _ = tx.send(result.map_err(|e| e.to_string()));
         ctx.request_repaint();
@@ -148,6 +150,7 @@ fn scan_remote(ws: &Arc<Mutex<Workspace>>, known: &HashSet<String>) -> Result<Sc
         remote,
         offline: status.offline,
         followed_moves: status.followed_moves,
+        followed_deletes: status.followed_deletes,
     })
 }
 

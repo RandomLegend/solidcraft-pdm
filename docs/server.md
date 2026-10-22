@@ -52,6 +52,16 @@ extra step, and can be switched off per vault: on the administration page under 
 - the safety rules stay: a change made on an old version is still refused (*Conflict*), and
   anyone may still check a design out, which keeps the others out as before.
 
+### Deleted designs
+
+Anyone who may change a vault can delete a design in the app (not while someone else has it
+checked out). It is gone for everyone at once: unchanged copies in workspaces are removed on
+their next refresh; a copy someone had changed stays, shown as *Removed on the server*. The
+server keeps the design with all its versions for 7 days (*Deleted* on the administration page
+sets 1 to 365), where an administrator can *Restore* it (back where it was, or beside a design
+that took its name; workspaces get it again) or delete it for good at once. After that time an
+hourly clean-up removes it, and the stored files nothing else uses.
+
 ## With Docker
 
 Each release has an image, `registry.gitlab.com/randomlegend/solidcraft-pdm/server` (tags

@@ -17,6 +17,7 @@
 mod lifecycle;
 mod shared;
 mod store;
+mod trash;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -29,10 +30,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub use lifecycle::{Lifecycle, Release, RevisionScheme, State, next_revision};
 pub use shared::{Lock, Stats, is_hash};
 pub use store::hash;
+pub use trash::Deleted;
 use store::{Store, write_atomic};
 
 pub const PDM_DIR: &str = ".pdm";
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -662,7 +664,8 @@ impl Vault {
         let mut stmt = self.db.prepare(
             "SELECT d.path, d.state, r.revision, r.version, r.released_at, r.note
              FROM documents d LEFT JOIN releases r
-               ON r.id = (SELECT MAX(id) FROM releases WHERE document_id = d.id)",
+               ON r.id = (SELECT MAX(id) FROM releases WHERE document_id = d.id)
+             WHERE d.deleted_at IS NULL",
         )?;
         let rows = stmt.query_map([], |r| {
             let release = match r.get::<_, Option<String>>(2)? {
@@ -680,7 +683,7 @@ impl Vault {
             "SELECT d.path, v.number, v.hash, v.size, v.comment, v.author, v.created_at, v.path,
                     v.name, v.part_number, v.revision, v.format, v.thumbnail
              FROM documents d JOIN versions v ON v.document_id = d.id
-             WHERE v.number = (SELECT MAX(number) FROM versions WHERE document_id = d.id)",
+             WHERE v.number = (SELECT MAX(number) FROM versions WHERE document_id = d.id) AND d.deleted_at IS NULL",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, version_from_row_at(r, 1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -782,6 +785,18 @@ fn migrate(db: &Connection) -> Result<()> {
                  since       INTEGER NOT NULL
              );
              PRAGMA user_version = 3;
+             COMMIT;",
+        )?;
+    }
+    if version < 4 {
+        // Deleted designs, kept for a while (`trash`): their path becomes `/deleted/<id>`
+        // (never a vault path), so the name is free again.
+        db.execute_batch(
+            "BEGIN;
+             ALTER TABLE documents ADD COLUMN deleted_at INTEGER;
+             ALTER TABLE documents ADD COLUMN deleted_by TEXT;
+             ALTER TABLE documents ADD COLUMN deleted_from TEXT;
+             PRAGMA user_version = 4;
              COMMIT;",
         )?;
     }

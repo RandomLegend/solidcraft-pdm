@@ -50,6 +50,37 @@ impl Store {
         Ok(())
     }
 
+    /// Removes the objects not in `keep` whose file is older than `min_age` (younger ones may
+    /// belong to a check-in under way); how many and their bytes.
+    pub(crate) fn remove_unused(&self, keep: &std::collections::HashSet<String>, min_age: std::time::Duration) -> Result<(usize, u64)> {
+        let (mut count, mut bytes) = (0, 0);
+        let Ok(dirs) = fs::read_dir(&self.dir) else { return Ok((0, 0)) };
+        for dir in dirs.flatten() {
+            let prefix = dir.file_name().to_string_lossy().into_owned();
+            let Ok(files) = fs::read_dir(dir.path()) else { continue };
+            for file in files.flatten() {
+                let hash = format!("{prefix}{}", file.file_name().to_string_lossy());
+                if keep.contains(&hash) || !crate::is_hash(&hash) {
+                    continue;
+                }
+                let Ok(meta) = file.metadata() else { continue };
+                if meta.modified().ok().and_then(|t| t.elapsed().ok()).is_none_or(|age| age < min_age) {
+                    continue;
+                }
+                // Objects are read-only; Windows does not delete those.
+                let mut perms = meta.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                perms.set_readonly(false);
+                let _ = fs::set_permissions(file.path(), perms);
+                if fs::remove_file(file.path()).is_ok() {
+                    count += 1;
+                    bytes += meta.len();
+                }
+            }
+        }
+        Ok((count, bytes))
+    }
+
     pub(crate) fn contains(&self, hash: &str) -> bool {
         self.path(hash).is_file()
     }

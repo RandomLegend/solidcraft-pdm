@@ -103,6 +103,8 @@ pub struct Status {
     pub folders: Vec<String>,
     /// Moves by others that were applied here (from, to).
     pub followed_moves: Vec<(String, String)>,
+    /// Designs deleted on the server whose unchanged copies were removed here.
+    pub followed_deletes: Vec<String>,
     /// The server could not be reached: the rest is from the last time it could.
     pub offline: Option<String>,
 }
@@ -209,15 +211,46 @@ impl Workspace {
             Err(e) => offline = Some(e.to_string()),
         }
         let followed_moves = if offline.is_none() { self.follow_moves()? } else { Vec::new() };
+        let followed_deletes = if offline.is_none() { self.follow_deletes()? } else { Vec::new() };
         let designs = self.designs()?;
         let images = self.image_status()?;
         self.save()?;
-        Ok(Status { designs, images, folders: self.state.tree.folders.clone(), followed_moves, offline })
+        Ok(Status { designs, images, folders: self.state.tree.folders.clone(), followed_moves, followed_deletes, offline })
     }
 
     /// The last known server state of a design.
     pub fn server_design(&self, path: &str) -> Option<&Design> {
         self.state.tree.designs.iter().find(|d| d.path == path)
+    }
+
+    /// Removes local copies of designs deleted on the server, when unchanged here (changed ones
+    /// stay, shown as removed on the server: the user decides).
+    fn follow_deletes(&mut self) -> Result<Vec<String>> {
+        let ids: std::collections::HashSet<i64> = self.state.tree.designs.iter().map(|d| d.id).collect();
+        let mut gone = Vec::new();
+        for (path, base) in self.state.files.clone() {
+            if ids.contains(&base.id) || !vault::is_design(Path::new(&path)) {
+                continue;
+            }
+            if self.local_hash(&path)?.is_some_and(|h| h != base.hash) {
+                continue;
+            }
+            remove_file(&self.absolute(&path))?;
+            self.state.files.remove(&path);
+            self.state.stat.remove(&path);
+            gone.push(path);
+        }
+        Ok(gone)
+    }
+
+    /// Deletes a design on the server (it keeps it a while for an administrator to restore),
+    /// and here.
+    pub fn delete(&mut self, path: &str) -> Result<()> {
+        self.client.act(&self.state.vault, &Action::Delete { path: path.to_owned() })?;
+        remove_file(&self.absolute(path))?;
+        self.state.files.remove(path);
+        self.state.stat.remove(path);
+        self.refresh_tree()
     }
 
     /// Renames local files that others moved on the server (by document id), when unchanged here.
@@ -649,4 +682,17 @@ fn dunce_canonical(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(abs)
+}
+
+/// Removes a file, also a read-only one (Windows refuses those), and one that is gone already.
+fn remove_file(file: &Path) -> Result<()> {
+    if let Ok(meta) = fs::metadata(file) {
+        if meta.permissions().readonly() {
+            set_readonly(file, false);
+        }
+    }
+    match fs::remove_file(file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
 }

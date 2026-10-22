@@ -283,3 +283,57 @@ fn a_vault_without_check_outs_takes_changes_directly() {
     assert_eq!(status(&mut anna, LID), RemoteStatus::Conflict);
     assert_eq!(anna.checkin(LID, "stale", false).unwrap_err().code(), Some(ErrorCode::Stale));
 }
+
+#[test]
+fn deleted_designs_go_for_everyone_and_come_back() {
+    let data = tempfile::tempdir().unwrap();
+    let server = Server::open(data.path(), "Test").unwrap();
+    server.add_vault("workshop").unwrap();
+    for user in ["anna", "ben"] {
+        server.accounts.add_user(user, &format!("{user}-password"), false).unwrap();
+        server.accounts.grant(user, "workshop", protocol::Access::Write).unwrap();
+    }
+    let url = scpdm_server::spawn_for_tests(server.clone());
+    let (_a, mut anna) = workspace(&url, "anna", "anna-password");
+    let (_b, mut ben) = workspace(&url, "ben", "ben-password");
+    write(&anna, LID, &design("LID-1", 1));
+    anna.add(LID, "First lid").unwrap();
+    ben.get(LID).unwrap();
+
+    // Not while someone else has it checked out.
+    ben.checkout(LID).unwrap();
+    assert_eq!(anna.delete(LID).unwrap_err().code(), Some(ErrorCode::Locked));
+    ben.undo_checkout(LID, false).unwrap();
+
+    anna.delete(LID).unwrap();
+    assert!(!anna.absolute(LID).exists());
+    assert!(anna.status().unwrap().designs.is_empty(), "gone here");
+    let status = ben.status().unwrap();
+    assert_eq!(status.followed_deletes, [LID]);
+    assert!(!ben.absolute(LID).exists() && status.designs.is_empty(), "and at ben's");
+
+    // The administrator brings it back; the workspaces get it again.
+    let deleted = server.deleted_designs().unwrap();
+    assert_eq!((deleted[0].path.as_str(), deleted[0].deleted_by.as_str()), (LID, "anna"));
+    assert_eq!(server.restore_deleted("workshop", deleted[0].id).unwrap(), LID);
+    assert_eq!(status_of(&mut ben, LID), RemoteStatus::NotDownloaded);
+    ben.get(LID).unwrap();
+    assert_eq!(fs::read_to_string(ben.absolute(LID)).unwrap(), design("LID-1", 1));
+    assert_eq!(ben.history(LID).unwrap().len(), 1, "with its history");
+}
+
+#[test]
+fn a_changed_copy_of_a_deleted_design_stays() {
+    let mut t = team();
+    t.ben.get(LID).unwrap();
+    write(&t.ben, LID, &design("BEN", 5));
+    t.anna.delete(LID).unwrap();
+    let status = t.ben.status().unwrap();
+    assert!(status.followed_deletes.is_empty());
+    assert_eq!(status.designs.iter().find(|e| e.path == LID).unwrap().status, RemoteStatus::RemovedOnServer);
+    assert_eq!(fs::read_to_string(t.ben.absolute(LID)).unwrap(), design("BEN", 5), "his work is kept");
+}
+
+fn status_of(ws: &mut Workspace, path: &str) -> RemoteStatus {
+    status(ws, path)
+}

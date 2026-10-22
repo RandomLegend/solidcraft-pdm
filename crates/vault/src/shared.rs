@@ -93,7 +93,7 @@ impl Vault {
     /// Every document's id, by path. Ids stay the same when a document moves, so workspaces can
     /// follow moves.
     pub fn document_ids(&self) -> Result<HashMap<String, i64>> {
-        let mut stmt = self.db.prepare("SELECT path, id FROM documents")?;
+        let mut stmt = self.db.prepare("SELECT path, id FROM documents WHERE deleted_at IS NULL")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -154,7 +154,7 @@ impl Vault {
     pub fn stats(&self) -> Result<Stats> {
         let count = |sql: &str| -> Result<u64> { Ok(self.db.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64) };
         Ok(Stats {
-            designs: count("SELECT COUNT(*) FROM documents")?,
+            designs: count("SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL")?,
             versions: count("SELECT COUNT(*) FROM versions")?,
             releases: count("SELECT COUNT(*) FROM releases")?,
             checked_out: count("SELECT COUNT(*) FROM locks")?,

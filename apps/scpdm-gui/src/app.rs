@@ -32,6 +32,8 @@ const THUMB_ASPECT: f32 = 1.6;
 const ROW_THUMB_WIDTHS: std::ops::RangeInclusive<f32> = 48.0..=240.0;
 const HISTORY_THUMB: egui::Vec2 = egui::vec2(80.0, 50.0);
 const MAX_RECENT: usize = 8;
+/// How long a local vault keeps deleted designs.
+const KEEP_DELETED: Duration = Duration::from_secs(30 * 24 * 3600);
 /// How long a saved design must stay unchanged before it is checked in automatically (so a
 /// save in progress is not caught half-way).
 const AUTO_CHECKIN_AFTER: Duration = Duration::from_secs(4);
@@ -171,6 +173,8 @@ enum View {
     TopLevel,
     /// Everything below this folder.
     Folder(String),
+    /// A local vault's deleted designs (kept 30 days).
+    Deleted,
 }
 
 /// A design being dragged onto a folder.
@@ -205,6 +209,10 @@ enum Dialog {
     Connect(ConnectForm),
     /// A newer release: its notes, and installing it.
     Update { error: Option<String> },
+    /// Deleting a design: which designs use it, and whether on a server.
+    Delete { path: String, used_in: Vec<String>, remote: bool },
+    /// Removing a deleted design for good.
+    Purge { id: i64, path: String },
     Release { path: String, revision: String, note: String },
     Properties { path: String, name: String, values: [String; 7], check_in: bool, comment: String },
 }
@@ -301,6 +309,12 @@ enum Action {
     SetAppearance(Appearance),
     SetAutoCheckin(bool),
     SetDrawThumbnails(bool),
+    /// Asks before deleting a design, then deletes it.
+    AskDelete(String),
+    Delete(String),
+    RestoreDeleted(i64),
+    AskPurge { id: i64, path: String },
+    Purge(i64),
     InstallUpdate,
     SkipUpdate,
 }
@@ -348,6 +362,8 @@ pub struct App {
     auto_failed: HashSet<(String, Option<String>)>,
     /// SolidCraft drawing thumbnails, and its pictures by content hash (`None`: could not).
     renderer: Option<crate::render::Renderer>,
+    /// A local vault's deleted designs.
+    deleted: Vec<vault::Deleted>,
     rendered: HashMap<String, Option<Arc<[u8]>>>,
     update_check: Option<(Receiver<Result<update::Release, String>>, bool)>,
     update: Option<update::Release>,
@@ -394,6 +410,7 @@ impl App {
             install_kind: update::Kind::detect(),
             auto_failed: HashSet::new(),
             renderer: None,
+            deleted: Vec::new(),
             rendered: HashMap::new(),
             update_check: None,
             update: None,
@@ -456,6 +473,13 @@ impl App {
                 self.settings.recent.truncate(MAX_RECENT);
                 self.settings.last_vault = Some(root);
                 self.backend = Some(backend);
+                if let Some(vault) = self.backend.as_mut().and_then(Backend::local) {
+                    let before = now_secs() - KEEP_DELETED.as_secs() as i64;
+                    if let Err(e) = vault.purge_deleted(before) {
+                        self.error(format!("Cleaning up deleted designs: {e}"));
+                    }
+                }
+                self.deleted.clear();
                 self.entries.clear();
                 self.remote.clear();
                 self.offline = None;
@@ -636,6 +660,10 @@ impl App {
                 self.images = scan.images;
                 self.remote = scan.remote;
                 self.offline = scan.offline;
+                self.deleted = self.backend.as_mut().and_then(Backend::local).and_then(|v| v.deleted().ok()).unwrap_or_default();
+                if !scan.followed_deletes.is_empty() {
+                    self.info_msg(format!("Deleted on the server: {}", scan.followed_deletes.join(", ")));
+                }
                 if !scan.followed_moves.is_empty() {
                     let moves: Vec<String> = scan.followed_moves.iter().map(|(a, b)| format!("{a} to {b}")).collect();
                     self.info_msg(format!("Moved on the server: {}", moves.join(", ")));
@@ -1131,6 +1159,52 @@ impl App {
             Action::Refresh => self.start_scan(ctx),
             Action::CheckForUpdates => self.check_for_updates(ctx, true),
             Action::SetUpdateChecks(on) => self.settings.check_updates = on,
+            Action::AskDelete(path) => {
+                let used_in = self.used_in(&path);
+                let remote = self.backend.as_ref().is_some_and(Backend::is_remote);
+                self.dialog = Some(Dialog::Delete { path, used_in, remote });
+            }
+            Action::Delete(path) => {
+                let Some(backend) = self.backend.as_mut() else { return };
+                match backend.delete(&path) {
+                    Ok(()) => {
+                        let remote = backend.is_remote();
+                        self.info_msg(if remote {
+                            format!("Deleted {path} (the server keeps it a while: an administrator can restore it)")
+                        } else {
+                            format!("Deleted {path} (in Recently deleted for 30 days)")
+                        });
+                        if self.selected.as_deref() == Some(path.as_str()) {
+                            self.selected = None;
+                            self.history.clear();
+                        }
+                        self.start_scan(ctx);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Action::RestoreDeleted(id) => {
+                let Some(vault) = self.backend.as_mut().and_then(Backend::local) else { return };
+                match vault.restore_deleted(id) {
+                    Ok(path) => {
+                        self.info_msg(format!("Restored {path}"));
+                        self.deleted.retain(|d| d.id != id);
+                        self.start_scan(ctx);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Action::AskPurge { id, path } => self.dialog = Some(Dialog::Purge { id, path }),
+            Action::Purge(id) => {
+                let Some(vault) = self.backend.as_mut().and_then(Backend::local) else { return };
+                match vault.purge_one(id) {
+                    Ok(()) => {
+                        self.deleted.retain(|d| d.id != id);
+                        self.info_msg("Deleted for good");
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
             Action::SetDrawThumbnails(on) => {
                 self.settings.draw_thumbnails = on;
                 self.rendered.clear();
@@ -1826,6 +1900,11 @@ impl App {
                     }
                 }
             }
+            if !self.deleted.is_empty() || self.view == View::Deleted {
+                if theme::nav_row(ui, Some(Icon::Delete), "Recently deleted", Some(self.deleted.len()), None, view == View::Deleted).clicked() {
+                    view = View::Deleted;
+                }
+            }
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 ui.add_space(10.0);
@@ -2000,6 +2079,10 @@ impl App {
     }
 
     fn list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        if self.view == View::Deleted {
+            self.deleted_list(ui, actions);
+            return;
+        }
         self.refilter();
         let searching = !self.search.trim().is_empty();
         if searching {
@@ -2010,18 +2093,20 @@ impl App {
         ui.add_space(4.0);
         let here = self.current_folder();
         if self.rows.is_empty() {
-            let response = ui
-                .centered_and_justified(|ui| {
-                    ui.weak(if searching {
-                        "Nothing matches".to_owned()
-                    } else if self.entries.is_empty() && self.scan.is_some() {
-                        "Scanning…".to_owned()
-                    } else {
-                        "No designs here. Right-click for a new design, or drag designs onto a folder on the left.".to_owned()
-                    });
-                })
-                .response
-                .interact(egui::Sense::click());
+            let text = if searching {
+                "Nothing matches".to_owned()
+            } else if self.entries.is_empty() && self.scan.is_some() {
+                "Scanning…".to_owned()
+            } else {
+                "No designs here. Right-click for a new design or folder, or drag designs onto a folder on the left.".to_owned()
+            };
+            // The whole area takes the right click (a text widget on it would take it instead).
+            let rect = ui.available_rect_before_wrap();
+            let response = ui.allocate_rect(rect, egui::Sense::click());
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
+            let t = theme::tokens(ui);
+            let galley = ui.painter().layout(text, egui::FontId::proportional(size::BODY), t.text_dim, (rect.width() - 40.0).max(100.0));
+            ui.painter().galley(rect.center() - galley.size() / 2.0, galley, t.text_dim);
             response.context_menu(|ui| new_here_menu(ui, &here, actions));
             return;
         }
@@ -2235,12 +2320,62 @@ impl App {
                         ui.separator();
                         // In a filter or search the row's own folder; in a folder view, that folder.
                         new_here_menu(ui, folder, actions);
+                        if !is_image {
+                            ui.separator();
+                            if ui.button(RichText::new("Delete…").color(theme::now().error)).clicked() {
+                                actions.push(Action::AskDelete(path.to_owned()));
+                                ui.close();
+                            }
+                        }
                     });
                 });
             });
         // Right-click below the list.
         let rest = ui.allocate_response(ui.available_size().max(egui::vec2(0.0, 0.0)), egui::Sense::click());
         rest.context_menu(|ui| new_here_menu(ui, &here, actions));
+    }
+
+    /// A local vault's deleted designs: restore them, or delete them for good.
+    fn deleted_list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let t = theme::tokens(ui);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Recently deleted").font(theme::semibold(size::TITLE)));
+            ui.label(
+                RichText::new("Deleted designs are kept here with their versions for 30 days, then removed for good. Restored, a design is back where it was, or beside a design that took its name.")
+                    .color(t.text_dim),
+            );
+            ui.add_space(10.0);
+            if self.deleted.is_empty() {
+                ui.label(RichText::new("Nothing deleted.").color(t.text_dim));
+            }
+            let now = now_secs();
+            for d in self.deleted.clone() {
+                theme::card(t).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(&d.path).font(theme::medium(size::HEADING)));
+                            let days = ((d.deleted_at + KEEP_DELETED.as_secs() as i64 - now) / 86400).max(0);
+                            let versions = d.latest.as_ref().map_or(0, |v| v.number);
+                            ui.label(
+                                RichText::new(format!("Deleted {} · {versions} version{} · removed for good in {days} days", unix_time(d.deleted_at), if versions == 1 { "" } else { "s" }))
+                                    .size(size::SMALL + 0.5)
+                                    .color(t.text_dim),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(theme::secondary("Delete for good…")).clicked() {
+                                actions.push(Action::AskPurge { id: d.id, path: d.path.clone() });
+                            }
+                            if ui.add(theme::primary("Restore", t)).clicked() {
+                                actions.push(Action::RestoreDeleted(d.id));
+                            }
+                        });
+                    });
+                });
+            }
+        });
     }
 
     fn details(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -2346,6 +2481,11 @@ impl App {
                     let movable = ui.add_enabled(present && by_other.is_none(), egui::Button::new("Move / rename…"));
                     if movable.on_disabled_hover_text(by_other.as_deref().unwrap_or_default()).clicked() {
                         rename = true;
+                    }
+                    ui.separator();
+                    let delete = ui.add_enabled(by_other.is_none(), egui::Button::new(RichText::new("Delete…").color(t.error)));
+                    if delete.on_disabled_hover_text(by_other.as_deref().unwrap_or_default()).clicked() {
+                        actions.push(Action::AskDelete(entry.path.clone()));
                     }
                 })
                 .0
@@ -2968,6 +3108,45 @@ impl App {
                         }
                     }
                 },
+                Dialog::Delete { path, used_in, remote } => {
+                    ui.set_max_width(480.0);
+                    ui.heading(format!("Delete {}?", path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f)));
+                    ui.label(if *remote {
+                        "It is gone for everyone, also from the others' workspaces (their unchanged copies). The server keeps it with its versions for a while: an administrator can restore it on the server's page."
+                    } else {
+                        "It goes into Recently deleted with its versions, for 30 days. Changes not checked in yet are checked in first, so nothing is lost."
+                    });
+                    if !used_in.is_empty() {
+                        ui.add_space(4.0);
+                        ui.colored_label(t.warning, format!("Used by {}: their links to it break.", used_in.join(", ")));
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let delete = egui::Button::new(RichText::new("Delete").font(theme::medium(size::BUTTON)).color(Color32::WHITE))
+                            .fill(t.error)
+                            .min_size(egui::vec2(0.0, theme::CONTROL_HEIGHT));
+                        if ui.add(delete).clicked() {
+                            actions.push(Action::Delete(path.clone()));
+                            close = true;
+                        }
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
+                    });
+                }
+                Dialog::Purge { id, path } => {
+                    ui.heading(format!("Delete {} for good?", path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f)));
+                    ui.label("With all its versions. This cannot be undone.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let purge = egui::Button::new(RichText::new("Delete for good").font(theme::medium(size::BUTTON)).color(Color32::WHITE))
+                            .fill(t.error)
+                            .min_size(egui::vec2(0.0, theme::CONTROL_HEIGHT));
+                        if ui.add(purge).clicked() {
+                            actions.push(Action::Purge(*id));
+                            close = true;
+                        }
+                        close |= ui.add(theme::secondary("Cancel")).clicked();
+                    });
+                }
                 Dialog::Compare { path, from, to, result } => {
                     ui.set_min_width(680.0);
                     ui.heading(format!("Compare {}", path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f)));

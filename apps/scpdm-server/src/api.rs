@@ -416,6 +416,11 @@ fn apply(vault: &mut Vault, user: &User, action: Action) -> Reply<Done> {
             vault.put_file(&path, &bytes)?;
             Ok(Done::default())
         }
+        Action::Delete { path } => {
+            not_checked_out_by_others(vault, &path, user, "")?;
+            vault.delete(&path, Some(&user.name))?;
+            Ok(Done::default())
+        }
         Action::DeleteImage { path } => {
             if !vault::is_image(std::path::Path::new(&path)) {
                 return Err(fail(StatusCode::BAD_REQUEST, ErrorCode::Invalid, format!("{path} is not an image")));

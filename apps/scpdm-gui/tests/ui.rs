@@ -661,3 +661,74 @@ fn checks_in_by_itself_when_asked_to() {
     settle(&mut harness);
     assert_eq!(Vault::open(&root).unwrap().history("enclosure/pi4-lid.solidcraft").unwrap().len(), 3);
 }
+
+/// A right click at `pos`.
+fn right_click_at<S>(harness: &mut Harness<'_, S>, pos: egui::Pos2) {
+    harness.hover_at(pos);
+    harness.step();
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        harness.step();
+    }
+    harness.run_steps(3);
+}
+
+#[test]
+fn a_new_empty_folder_takes_new_designs_and_folders() {
+    let (_dir, root, mut harness) = open_demo();
+    harness.get_by_label("+ New folder").click();
+    harness.run_steps(3);
+    type_text(&mut harness, "drawings");
+    harness.key_press(egui::Key::Enter);
+    settle(&mut harness);
+    harness.get_by_label("drawings  (0)").click();
+    harness.run_steps(4);
+    // Anywhere in the (empty) list: the folder's menu.
+    let hint = harness.get_by_label_contains("No designs here").rect();
+    right_click_at(&mut harness, egui::pos2(hint.center().x, hint.center().y + 120.0));
+    harness.get_by_label("New folder here…").click();
+    harness.run_steps(3);
+    type_text(&mut harness, "sheets");
+    harness.key_press(egui::Key::Enter);
+    settle(&mut harness);
+    assert!(root.join("drawings/sheets").is_dir(), "made inside the folder shown");
+}
+
+#[test]
+fn deleted_designs_wait_in_recently_deleted() {
+    let (_dir, root, mut harness) = open_demo();
+    let row = harness.get_by_label("m2.5-standoff.solidcraft").rect();
+    right_click_at(&mut harness, row.center());
+    harness.get_by_label("Delete…").click();
+    harness.run_steps(3);
+    harness.get_by_label("Delete m2.5-standoff.solidcraft?");
+    harness.get_by_label("Delete").click();
+    settle(&mut harness);
+    assert!(!root.join("parts/fasteners/m2.5-standoff.solidcraft").exists());
+    assert!(harness.query_by_label("m2.5-standoff.solidcraft").is_none());
+
+    harness.get_by_label("Recently deleted  (1)").click();
+    harness.run_steps(3);
+    harness.get_by_label("parts/fasteners/m2.5-standoff.solidcraft");
+    harness.get_by_label("Restore").click();
+    settle(&mut harness);
+    assert!(root.join("parts/fasteners/m2.5-standoff.solidcraft").is_file(), "back");
+    assert_eq!(Vault::open(&root).unwrap().history("parts/fasteners/m2.5-standoff.solidcraft").unwrap().len(), 1);
+
+    // Deleted for good: nothing to restore.
+    harness.get_by_label("All designs  (5)").click();
+    settle(&mut harness);
+    let row = harness.get_by_label("m2.5-standoff.solidcraft").rect();
+    right_click_at(&mut harness, row.center());
+    harness.get_by_label("Delete…").click();
+    harness.run_steps(3);
+    harness.get_by_label("Delete").click();
+    settle(&mut harness);
+    harness.get_by_label("Recently deleted  (1)").click();
+    harness.run_steps(3);
+    harness.get_by_label("Delete for good…").click();
+    harness.run_steps(3);
+    harness.get_by_label("Delete for good").click();
+    harness.run_steps(3);
+    assert!(Vault::open(&root).unwrap().deleted().unwrap().is_empty());
+}

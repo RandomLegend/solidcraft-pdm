@@ -216,3 +216,6 @@ ol.prose { padding-left: 1.3rem; display: grid; gap: 6px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 select.compact { width: auto; padding: 3px 8px; font-size: 0.85rem; }
+form.inline { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+form.inline label { margin: 0 0 8px; }
+form.inline .unit input { width: 6rem; }

@@ -3,6 +3,22 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
+## Unreleased
+
+### App
+
+- Designs can be deleted (right-click, or *···* in the details). In a vault of your own they
+  wait in *Recently deleted* for 30 days, with all their versions, and can be restored.
+- Right-clicking anywhere in an empty folder's list offers a new design or folder there.
+- Vaults use schema 4 (deleted designs): once opened by this version, older versions of the app
+  cannot open them.
+
+### Server
+
+- Deleting a design deletes it for everyone (unchanged copies in workspaces go too); the server
+  keeps it 7 days (adjustable) on the administration page's new *Deleted* page, where an
+  administrator restores it or deletes it for good. An hourly clean-up removes what is older.
+
 ## 0.2.3 — 2026-10-22
 
 ### App

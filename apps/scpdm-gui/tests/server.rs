@@ -221,3 +221,30 @@ fn a_vault_without_check_outs_takes_saves() {
     assert_eq!((history[0].number, history[0].comment.as_str()), (2, "Saved (checked in automatically)"));
     assert_eq!(check.status().unwrap().designs[0].status, remote::RemoteStatus::UpToDate);
 }
+
+#[test]
+fn deleting_on_a_server_vault_goes_to_the_server() {
+    let s = setup();
+    let mut h = open(&s.anna_root);
+    h.state_mut().select(CASE);
+    settle(&mut h);
+    h.get_by_label("Get").click();
+    settle(&mut h);
+    // The list's row (the details panel shows the name too, on the right).
+    let row = h.query_all_by_label("pi4-case.solidcraft").map(|n| n.rect()).min_by(|a, b| a.left().total_cmp(&b.left())).unwrap();
+    h.hover_at(row.center());
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: row.center(), button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(3);
+    h.get_by_label("Delete…").click();
+    h.run_steps(3);
+    h.get_by_label_contains("gone for everyone");
+    h.get_by_label("Delete").click();
+    settle(&mut h);
+    assert!(!s.anna_root.join(CASE).exists());
+    assert!(h.query_by_label("pi4-case.solidcraft").is_none());
+    h.get_by_label_contains("an administrator can restore it");
+}

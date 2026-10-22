@@ -159,7 +159,7 @@ function showLogin(message) {
 
 // ---- frame ----
 
-const PAGES = { dashboard: ["Dashboard", dashboard], users: ["Users", users], vaults: ["Vaults", vaults], backups: ["Backups", backups] };
+const PAGES = { dashboard: ["Dashboard", dashboard], users: ["Users", users], vaults: ["Vaults", vaults], backups: ["Backups", backups], deleted: ["Deleted", deletedPage] };
 
 function frame(page, content) {
   const nav = h("nav", { class: "nav" }, Object.entries(PAGES).map(([key, [label]]) =>
@@ -520,6 +520,62 @@ async function backups() {
         h("p", { class: "muted small" }, "The data folder: ", h("span", { class: "path" }, b.data)))),
     h("div", { class: "panel" }, h("h2", {}, "Recent runs"), runs),
     h("div", { class: "panel" }, h("h2", {}, "In the backup folder"), stored),
+  ];
+}
+
+// ---- deleted designs ----
+
+async function deletedPage() {
+  const d = await api("GET", "/api/admin/deleted");
+  const now = Date.now() / 1000;
+  const restore = async (x) => {
+    try {
+      const r = await api("POST", `/api/admin/vaults/${encodeURIComponent(x.vault)}/deleted/${x.id}/restore`);
+      toast(r.path === x.path ? `${x.path} is back in ${x.vault}` : `Back in ${x.vault} as ${r.path} (the name was taken)`);
+    } catch (e) {
+      if (e.status !== 401) toast(e.message, true);
+    }
+    route();
+  };
+  const purge = (x) => confirmDialog(`Delete ${x.path} for good?`, `With all its versions, from ${x.vault}. This cannot be undone.`, "Delete for good", async () => {
+    await api("DELETE", `/api/admin/vaults/${encodeURIComponent(x.vault)}/deleted/${x.id}`);
+    toast(`${x.path} is gone for good`);
+    route();
+  });
+  const form = h("form", { class: "form inline" },
+    h("label", { for: "keep" }, "Keep deleted designs for"),
+    h("div", { class: "unit" }, h("input", { id: "keep", name: "keep_days", type: "number", min: 1, max: 365, value: d.keep_days, required: true }), h("span", {}, "days")),
+    h("button", { type: "submit", class: "primary" }, "Save"));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await api("PUT", "/api/admin/deleted/settings", { keep_days: Number(form.keep_days.value) });
+      toast("Saved");
+      route();
+    } catch (e) {
+      if (e.status !== 401) toast(e.message, true);
+    }
+  });
+  const left = (at) => {
+    const days = Math.ceil((at - now) / 86400);
+    return days <= 1 ? "today" : `in ${days} days`;
+  };
+  return [
+    h("div", { class: "head" }, h("h1", { class: "grow" }, "Deleted designs")),
+    h("p", { class: "muted" }, "A design deleted in the app is gone for everyone at once and kept here, with all its versions, for the days below. Restored, it is back where it was (or beside a design that took its name); the workspaces get it again."),
+    h("div", { class: "panel" }, form),
+    h("div", { class: "panel wide" }, d.items.length === 0 ? h("div", { class: "empty" }, "Nothing deleted.") : h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "Design"), h("th", {}, "Deleted"), h("th", {}, "By"), h("th", { class: "num" }, "Versions"), h("th", { class: "num" }, "Size"), h("th", {}, "Removed for good"), h("th", {}))),
+      h("tbody", {}, d.items.map((x) => h("tr", {},
+        h("td", {}, h("div", { class: "path" }, x.path), h("div", { class: "muted small" }, x.vault)),
+        h("td", { class: "nowrap muted small", title: when(x.deleted_at) }, ago(x.deleted_at, now)),
+        h("td", {}, x.deleted_by),
+        h("td", { class: "num" }, x.versions),
+        h("td", { class: "num" }, bytes(x.size)),
+        h("td", { class: "nowrap muted small", title: when(x.purge_at) }, left(x.purge_at)),
+        h("td", { class: "actions" },
+          h("button", { class: "small primary", onclick: () => restore(x) }, "Restore"), " ",
+          h("button", { class: "small danger", onclick: () => purge(x) }, "Delete now"))))))),
   ];
 }
 

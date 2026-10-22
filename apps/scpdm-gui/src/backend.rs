@@ -149,6 +149,15 @@ impl Backend {
         self.rename(path, &to)
     }
 
+    /// Deletes a design: in a vault into its recently deleted (kept 30 days), on a server for
+    /// everyone (the server keeps it for an administrator to restore).
+    pub fn delete(&mut self, path: &str) -> Result<()> {
+        match self {
+            Backend::Local(v) => v.delete(path, None).map_err(text),
+            Backend::Remote(ws) => lock(ws).delete(path).map_err(text),
+        }
+    }
+
     pub fn create_folder(&mut self, folder: &str) -> Result<()> {
         match self {
             Backend::Local(v) => v.create_folder(folder).map_err(text),

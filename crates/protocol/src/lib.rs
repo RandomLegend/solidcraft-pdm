@@ -158,6 +158,9 @@ pub enum Action {
     /// A reference image (uploaded as `hash`), new or replaced.
     PutImage { path: String, hash: String },
     DeleteImage { path: String },
+    /// Deletes a design: it is gone for everyone, and kept on the server for a while (an
+    /// administrator can restore it). Refused while someone else has it checked out.
+    Delete { path: String },
 }
 
 impl Action {
@@ -177,6 +180,7 @@ impl Action {
             Action::DeleteFolder { .. } => "delete-folder",
             Action::PutImage { .. } => "put-image",
             Action::DeleteImage { .. } => "delete-image",
+            Action::Delete { .. } => "delete",
         }
     }
 }

@@ -415,7 +415,7 @@ fn vaults_from_the_first_schema_are_upgraded() {
     // As the first version of the tool left it: no state, no releases, no settings.
     let db = rusqlite::Connection::open(dir.path().join(".pdm/vault.db")).unwrap();
     db.execute_batch(
-        "DROP TABLE locks; DROP TABLE releases; DROP TABLE settings; ALTER TABLE documents DROP COLUMN state; PRAGMA user_version = 1;",
+        "ALTER TABLE documents DROP COLUMN deleted_at; ALTER TABLE documents DROP COLUMN deleted_by; ALTER TABLE documents DROP COLUMN deleted_from; DROP TABLE locks; DROP TABLE releases; DROP TABLE settings; ALTER TABLE documents DROP COLUMN state; PRAGMA user_version = 1;",
     )
     .unwrap();
     drop(db);
@@ -492,7 +492,7 @@ fn vaults_from_the_second_schema_get_locks() {
     vault.check_in(CASE, "v1").unwrap();
     drop(vault);
     let db = rusqlite::Connection::open(dir.path().join(".pdm/vault.db")).unwrap();
-    db.execute_batch("DROP TABLE locks; PRAGMA user_version = 2;").unwrap();
+    db.execute_batch("ALTER TABLE documents DROP COLUMN deleted_at; ALTER TABLE documents DROP COLUMN deleted_by; ALTER TABLE documents DROP COLUMN deleted_from; DROP TABLE locks; PRAGMA user_version = 2;").unwrap();
     drop(db);
     let mut vault = Vault::open(dir.path()).unwrap();
     assert_eq!(vault.lock(CASE, "anna").unwrap().user, "anna");
@@ -503,4 +503,52 @@ fn versions_can_be_by_another_author() {
     let (_dir, mut vault) = setup();
     vault.set_author(Some("anna".into()));
     assert_eq!(vault.check_in(CASE, "").unwrap().author, "anna");
+}
+
+#[test]
+fn deleted_designs_are_kept_until_purged_and_can_come_back() {
+    let (dir, mut vault) = setup();
+    let path = "parts/lid.solidcraft";
+    fs::create_dir_all(dir.path().join("parts")).unwrap();
+    fs::write(dir.path().join(path), design("LID-1", 1)).unwrap();
+    vault.check_in(path, "first").unwrap();
+    // Changed and not checked in: kept as a version before it goes.
+    fs::write(dir.path().join(path), design("LID-2", 2)).unwrap();
+    vault.delete(path, Some("anna")).unwrap();
+    assert!(!dir.path().join(path).exists());
+    assert_eq!(status(&mut vault, path), None, "gone from the vault's list");
+    assert!(vault.history(path).is_err());
+    let deleted = vault.deleted().unwrap();
+    assert_eq!(deleted.len(), 1);
+    assert_eq!((deleted[0].path.as_str(), deleted[0].deleted_by.as_str()), (path, "anna"));
+    assert_eq!(deleted[0].latest.as_ref().unwrap().comment, "Before deleting");
+
+    // The name is free for a new design meanwhile.
+    fs::write(dir.path().join(path), design("NEW", 1)).unwrap();
+    vault.check_in(path, "another lid").unwrap();
+    let restored = vault.restore_deleted(deleted[0].id).unwrap();
+    assert_eq!(restored, "parts/lid (restored).solidcraft");
+    assert_eq!(fs::read_to_string(dir.path().join(&restored)).unwrap(), design("LID-2", 2), "as it was deleted");
+    assert_eq!(vault.history(&restored).unwrap().len(), 2, "with its history");
+    assert_eq!(status(&mut vault, &restored), Some(Status::Current));
+    assert!(vault.deleted().unwrap().is_empty());
+
+    // Purged: gone for good.
+    vault.delete(&restored, None).unwrap();
+    let an_hour_ago = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - 3600;
+    assert_eq!(vault.purge_deleted(an_hour_ago).unwrap(), 0, "not old enough");
+    assert_eq!(vault.purge_deleted(i64::MAX).unwrap(), 1);
+    assert!(vault.deleted().unwrap().is_empty());
+    assert_eq!(status(&mut vault, path), Some(Status::Current), "the other lid is untouched");
+}
+
+#[test]
+fn a_new_design_is_checked_in_before_it_is_deleted() {
+    let (dir, mut vault) = setup();
+    fs::write(dir.path().join("sketch.solidcraft"), design("S", 1)).unwrap();
+    vault.delete("sketch.solidcraft", None).unwrap();
+    let deleted = vault.deleted().unwrap();
+    assert_eq!(deleted[0].latest.as_ref().unwrap().number, 1);
+    assert_eq!(vault.restore_deleted(deleted[0].id).unwrap(), "sketch.solidcraft");
+    assert!(matches!(vault.delete("nothing.solidcraft", None), Err(Error::NotTracked(_))));
 }

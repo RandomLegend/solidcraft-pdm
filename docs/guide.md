@@ -67,6 +67,16 @@ New designs are written as plain JSON in format 1, which every SolidCraft releas
 upgrades (checked with SolidCraft 0.18.3: it saves such a file as a `solidcraft/29` container
 and keeps its properties).
 
+## Deleting designs
+
+Right-click a design (or *···* in its details) > *Delete…*. In a vault of your own it goes into
+*Recently deleted* (in the list on the left) with all its versions, for 30 days; *Restore*
+brings it back where it was (or beside a design that took its name meanwhile). Changes not
+checked in yet are checked in first, so what comes back is what you deleted. In a server vault
+a design is deleted for everyone; the server keeps it for a while, and an administrator can
+restore it ([server.md](server.md#deleted-designs)). The confirmation says when other designs
+use the one you delete: their links to it break.
+
 ## Checking in automatically
 
 For one person, checking in by hand is often one step too many. *Vault > Settings > Versions >

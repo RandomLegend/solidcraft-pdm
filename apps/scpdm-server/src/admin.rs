@@ -48,6 +48,10 @@ pub fn router() -> Router<Shared> {
         .route("/api/admin/vaults", get(vaults).post(add_vault))
         .route("/api/admin/vaults/{vault}/unlock", post(unlock))
         .route("/api/admin/vaults/{vault}/checkout", put(set_checkout))
+        .route("/api/admin/deleted", get(deleted))
+        .route("/api/admin/deleted/settings", put(set_deleted_days))
+        .route("/api/admin/vaults/{vault}/deleted/{id}/restore", post(restore_deleted))
+        .route("/api/admin/vaults/{vault}/deleted/{id}", axum::routing::delete(purge_deleted))
         .route("/api/admin/backups", get(backups))
         .route("/api/admin/backups/settings", put(backup_settings))
         .route("/api/admin/backups/run", post(back_up_now))
@@ -525,5 +529,41 @@ async fn set_checkout(State(server): State<Shared>, Admin(..): Admin, Path(vault
         Ok(())
     })
     .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct DeletedList {
+    keep_days: u32,
+    items: Vec<crate::trash::DeletedDesign>,
+}
+
+async fn deleted(State(server): State<Shared>, Admin(..): Admin) -> Reply<axum::Json<DeletedList>> {
+    let list = accounts(&server, |s| Ok(DeletedList { keep_days: s.trash_days()?, items: s.deleted_designs()? })).await?;
+    Ok(axum::Json(list))
+}
+
+#[derive(Deserialize)]
+struct KeepDays {
+    keep_days: u32,
+}
+
+async fn set_deleted_days(State(server): State<Shared>, Admin(..): Admin, axum::Json(k): axum::Json<KeepDays>) -> Reply<StatusCode> {
+    accounts(&server, move |s| s.set_trash_days(k.keep_days)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct Restored {
+    path: String,
+}
+
+async fn restore_deleted(State(server): State<Shared>, Admin(..): Admin, Path((vault, id)): Path<(String, i64)>) -> Reply<axum::Json<Restored>> {
+    let path = accounts(&server, move |s| s.restore_deleted(&vault, id)).await?;
+    Ok(axum::Json(Restored { path }))
+}
+
+async fn purge_deleted(State(server): State<Shared>, Admin(..): Admin, Path((vault, id)): Path<(String, i64)>) -> Reply<StatusCode> {
+    accounts(&server, move |s| s.purge_deleted(&vault, id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
