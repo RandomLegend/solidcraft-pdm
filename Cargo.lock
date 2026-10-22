@@ -3386,7 +3386,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "protocol"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3571,7 +3571,7 @@ dependencies = [
 
 [[package]]
 name = "remote"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "protocol",
  "scformat",
@@ -3811,7 +3811,7 @@ dependencies = [
 
 [[package]]
 name = "scformat"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3834,7 +3834,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scpdm"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "clap",
@@ -3847,7 +3847,7 @@ dependencies = [
 
 [[package]]
 name = "scpdm-gui"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "eframe",
@@ -3872,7 +3872,7 @@ dependencies = [
 
 [[package]]
 name = "scpdm-server"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4714,7 +4714,7 @@ dependencies = [
 
 [[package]]
 name = "vault"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "dunce",
  "rusqlite",
