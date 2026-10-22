@@ -165,7 +165,8 @@ packaging/linux/build-appimage.sh             # dist/SolidCraft-PDM-<version>-x8
 2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 
 CI then builds the AppImage and the server (program and Docker image), and publishes a
-release with the changelog section as its notes and the files with their `SHA256SUMS`. A tag
+release with the changelog section as its notes and the files with their `SHA256SUMS` (and the
+same release on the GitHub mirror, when `GITHUB_REPO` and `GITHUB_TOKEN` are set). A tag
 whose version does not match `Cargo.toml`, or without a changelog section, fails the pipeline
 instead.
 
