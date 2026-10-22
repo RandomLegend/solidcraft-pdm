@@ -4,9 +4,10 @@
 #   docker compose exec pdm scpdm-server user add root --admin
 #
 # Backups (daily by default; schedule and how many to keep on the administration page) go to
-# the volume pdm-backups. Better on another disk or a share: set PDM_BACKUPS to a folder there
-# (it must be writable for the user id 7380: `chown 7380 /mnt/nas/pdm`), or make pdm-backups
-# an SMB or NFS volume (see the end of this file).
+# the volume pdm-backups. Better on another disk or a share: set PDM_BACKUPS to a folder there,
+# or make pdm-backups an SMB or NFS volume (see the end of this file). The server runs as user
+# id 7380; for a folder owned by someone else (a share, say) set PUID and PGID to its owner
+# (`ls -ln` shows the numbers), or give 7380 write access (`chown 7380 /mnt/nas/pdm`).
 #
 # HTTPS (optional): set PDM_DOMAIN to the server's name (it must reach this machine on ports
 # 80 and 443, for the certificate) and start with the "https" profile:
@@ -22,6 +23,9 @@ services:
     restart: unless-stopped
     environment:
       SCPDM_SERVER_NAME: ${PDM_NAME:-SolidCraft PDM}
+      # The user (and group) the server runs as: the owner of the backup folder.
+      PUID: ${PUID:-7380}
+      PGID: ${PGID:-7380}
     ports:
       - "${PDM_PORT:-7380}:7380"
     volumes:

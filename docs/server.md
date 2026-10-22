@@ -38,6 +38,20 @@ Statuses in the app: *On the server* (not fetched), *Up to date*, *Newer on serv
 out*, *Checked out · changed*, *Checked out by anna*, *Changed, not checked out*, *Conflict*,
 *Not on the server* (a new file of yours: *Add to the server*), *Removed on the server*.
 
+### A vault for one person: check-out optional
+
+Check-outs keep two people from changing a design at once. For a vault only you use (on a
+server so your designs are backed up and reachable from several computers) they are just an
+extra step, and can be switched off per vault: on the administration page under *Vaults*,
+*Check-out: optional* (or `scpdm-server vault checkout NAME optional`). Then:
+
+- files in workspaces are not read-only, and a design you saved shows as *Changed*, with a
+  *Check in* button: no check-out first;
+- with *Check in automatically* in the app's settings, every save goes up as the next version
+  by itself, a few seconds later;
+- the safety rules stay: a change made on an old version is still refused (*Conflict*), and
+  anyone may still check a design out, which keeps the others out as before.
+
 ## With Docker
 
 Each release has an image, `registry.gitlab.com/randomlegend/solidcraft-pdm/server` (tags
@@ -129,8 +143,11 @@ backups in the folder.
   page. Mount the share with your system as usual (`/etc/fstab`); the server writes as the user
   it runs as, so that user must be able to write there (for SMB: `uid=` in the mount options).
 - **With Docker:** backups go to `/backups` in the container: the volume `pdm-backups` in
-  `compose.yml`, or a folder of your choice with `PDM_BACKUPS=/mnt/nas/pdm` (writable for
-  user id 7380: `chown 7380 /mnt/nas/pdm`). `compose.yml` also shows how to make the volume
+  `compose.yml`, or a folder of your choice with `PDM_BACKUPS=/mnt/nas/pdm`. The server runs
+  as user id 7380: set `PUID` and `PGID` to the folder's owner (`ls -ln` shows the numbers,
+  for example `PUID=1000 PGID=1000`), or give 7380 write access (`chown 7380 /mnt/nas/pdm`;
+  on an NFS share with root squashing, on the NFS server). Changing `PUID` also hands the data
+  volume to that user. `compose.yml` also shows how to make the volume
   an SMB or NFS share directly.
 
 The page warns when the folder is on the same disk as the data (a failing disk would take both).

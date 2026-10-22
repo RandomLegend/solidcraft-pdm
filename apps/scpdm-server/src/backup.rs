@@ -270,7 +270,7 @@ impl Server {
         let marker = target.join(MARKER);
         if !marker.exists() {
             fs::write(&marker, "Backups of a SolidCraft PDM server. Each pdm-backup-… folder is a complete data folder.\n")
-                .map_err(|e| anyhow::anyhow!("cannot write into {}: {e}", target.display()))?;
+                .map_err(|e| unwritable(target, e))?;
         }
         // Left over from a run that broke off.
         for entry in fs::read_dir(target)?.flatten() {
@@ -282,7 +282,7 @@ impl Server {
         let partial = target.join(format!("{PARTIAL}{name}"));
         let previous = stored(target).first().map(|b| target.join(&b.name));
         let mut copier = Copier { previous, count: Count::default(), links: true };
-        fs::create_dir(&partial).map_err(|e| anyhow::anyhow!("cannot write into {}: {e}", target.display()))?;
+        fs::create_dir(&partial).map_err(|e| unwritable(target, e))?;
 
         let result = (|| -> anyhow::Result<Vec<String>> {
             // Database copies are made in the data folder (a local disk), then copied over.
@@ -414,6 +414,30 @@ impl Copier {
         }
         Ok(())
     }
+}
+
+/// The error for a backup folder the server may not write to, saying who needs access.
+fn unwritable(target: &Path, e: io::Error) -> anyhow::Error {
+    if e.kind() != io::ErrorKind::PermissionDenied {
+        return anyhow::anyhow!("cannot write into {}: {e}", target.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = fs::metadata(target).map(|m| m.uid()).ok();
+        // The server's own user id (Linux).
+        let me = fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| s.lines().find_map(|l| l.strip_prefix("Uid:")).and_then(|v| v.split_whitespace().next().map(str::to_owned)));
+        if let (Some(owner), Some(me)) = (owner, me) {
+            return anyhow::anyhow!(
+                "the server may not write into {} (it runs as user {me}, the folder belongs to user {owner}): give user {me} write access \
+                 (chown {me} on the folder), or run the server as the folder's owner (in Docker: PUID={owner} and PGID)",
+                target.display()
+            );
+        }
+    }
+    anyhow::anyhow!("the server may not write into {}: give the user it runs as write access", target.display())
 }
 
 /// Renames a finished backup. An SMB share refuses that while a file in it is open, and the

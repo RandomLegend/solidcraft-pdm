@@ -3,6 +3,24 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
+## Unreleased
+
+### App
+
+- Thumbnails drawn by SolidCraft itself, with the edges outlined as on SolidCraft's start page
+  (`solidcraft-cli`, found on `PATH`, next to SolidCraft or in its AppImage), each version once,
+  kept in the cache; the picture saved in the file is the fallback. *Settings > Thumbnails*.
+- *Settings > Versions > Check in automatically*: saved designs become versions by themselves.
+- Server vaults without check-outs: a saved design shows as *Changed* and is checked in directly.
+
+### Server
+
+- Check-out can be made optional per vault (*Vaults* on the administration page, or
+  `scpdm-server vault checkout NAME optional`), for a vault one person uses.
+- Docker: `PUID` and `PGID` run the server as another user, such as the owner of a backup
+  folder on a share. A backup folder the server may not write to now says which user needs
+  access.
+
 ## 0.2.2 — 2026-10-21
 
 ### App

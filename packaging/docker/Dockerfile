@@ -1,7 +1,7 @@
 # The SolidCraft PDM server. From the project folder:
 #   docker build -f packaging/docker/Dockerfile -t solidcraft-pdm-server .
 # Data (users, vaults) lives in the volume /data, backups go to the volume /backups; the server
-# listens on port 7380.
+# listens on port 7380 and runs as user 7380, or as PUID:PGID if set (see scpdm-server.sh).
 
 FROM rust:1.93-bookworm AS build
 WORKDIR /src
@@ -14,8 +14,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim
 RUN useradd --system --uid 7380 --home-dir /data pdm \
     && mkdir /data /backups && chown pdm /data /backups
-COPY --from=build /usr/local/bin/scpdm-server /usr/local/bin/
-USER pdm
+COPY --from=build /usr/local/bin/scpdm-server /usr/local/lib/scpdm/scpdm-server
+COPY --chmod=755 packaging/docker/scpdm-server.sh /usr/local/bin/scpdm-server
+# Starts as root only to switch to PUID:PGID (scpdm-server.sh).
 ENV SCPDM_SERVER_DATA=/data \
     SCPDM_SERVER_LISTEN=0.0.0.0:7380 \
     SCPDM_BACKUP_DIR=/backups
