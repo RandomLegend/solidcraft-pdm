@@ -76,6 +76,9 @@ enum UserCommand {
 enum VaultCommand {
     Add { name: String },
     List,
+    /// Whether designs must be checked out to be checked in: "required" (a team), or
+    /// "optional" (one person; changes are checked in without checking out)
+    Checkout { name: String, rule: String },
 }
 
 fn password(from_stdin: bool) -> anyhow::Result<String> {
@@ -156,8 +159,21 @@ fn main() -> anyhow::Result<()> {
                 }
                 VaultCommand::List => {
                     for name in server.vault_names()? {
-                        println!("{name}");
+                        let rule = vault::Vault::open(cli.data.join("vaults").join(&name))?.checkout_required()?;
+                        println!("{name}{}", if rule { "" } else { "  (check-out optional)" });
                     }
+                }
+                VaultCommand::Checkout { name, rule } => {
+                    anyhow::ensure!(server.vault_names()?.contains(&name), "no vault {name}");
+                    let required = match rule.as_str() {
+                        "required" => true,
+                        "optional" => false,
+                        _ => anyhow::bail!("{rule}: required or optional"),
+                    };
+                    vault::Vault::open(cli.data.join("vaults").join(&name))?.set_checkout_required(required)?;
+                    // A running server tells its clients on the vault's next change, or after a
+                    // restart; the administration page tells them at once.
+                    println!("{name}: check-out {rule}");
                 }
             }
         }

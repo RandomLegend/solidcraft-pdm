@@ -119,12 +119,15 @@ pub struct Image {
     pub size: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tree {
     /// Changes with every change to the vault.
     pub counter: u64,
     /// The rest is empty: nothing changed since the counter the client sent.
     pub unchanged: bool,
+    /// Whether a design must be checked out to be checked in (servers before 0.2.3: always).
+    #[serde(default = "yes")]
+    pub checkout_required: bool,
     pub designs: Vec<Design>,
     pub folders: Vec<String>,
     pub images: Vec<Image>,
@@ -259,5 +262,16 @@ mod tests {
         let e = ApiError { by: Some("anna".into()), ..ApiError::new(ErrorCode::Locked, "checked out by anna") };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains(r#""code":"locked""#) && json.contains(r#""by":"anna""#) && !json.contains("latest"));
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Tree {
+    /// Empty, with check-out required (the safe assumption).
+    fn default() -> Self {
+        Tree { counter: 0, unchanged: false, checkout_required: true, designs: Vec::new(), folders: Vec::new(), images: Vec::new() }
     }
 }

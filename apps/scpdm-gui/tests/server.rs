@@ -181,3 +181,43 @@ fn connects_to_a_server_and_opens_a_vault() {
     h.get_by_label("pi4-case.solidcraft");
     h.get_by_label("On the server");
 }
+
+#[test]
+fn a_vault_without_check_outs_takes_saves() {
+    let data = tempfile::tempdir().unwrap();
+    let server = Server::open(data.path(), "Workshop server").unwrap();
+    server.add_vault("workshop").unwrap();
+    vault::Vault::open(data.path().join("vaults/workshop")).unwrap().set_checkout_required(false).unwrap();
+    server.accounts.add_user("anna", "anna-password", false).unwrap();
+    server.accounts.grant("anna", "workshop", protocol::Access::Write).unwrap();
+    let url = scpdm_server::spawn_for_tests(server);
+    let dir = tempfile::tempdir().unwrap();
+    let mut anna = Workspace::create(dir.path(), login(&url, "anna"), "anna", "workshop").unwrap();
+    fs::create_dir_all(anna.absolute("Enclosures")).unwrap();
+    fs::copy(Path::new(FIXTURES).join("json-pi-case.solidcraft"), anna.absolute(CASE)).unwrap();
+    anna.add(CASE, "First case").unwrap();
+    let root = anna.root().to_path_buf();
+    drop(anna);
+
+    // Saved in SolidCraft: no check-out needed, the panel offers to check it in.
+    let file = root.join(CASE);
+    let changed = fs::read_to_string(&file).unwrap().replace(r#""board_w""#, r#""board_width""#);
+    fs::write(&file, changed).unwrap();
+    let mut h = open(&root);
+    h.state_mut().select(CASE);
+    settle(&mut h);
+    assert!(shown(&h, "Changed"));
+    h.get_by_label("⬆ Check in");
+
+    // With automatic check-in, the next save goes up by itself.
+    h.state_mut().set_auto_checkin(true);
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+    fs::File::options().write(true).open(&file).unwrap().set_modified(when).unwrap();
+    h.key_press(egui::Key::F5);
+    settle(&mut h);
+    settle(&mut h);
+    let mut check = Workspace::open(&root).unwrap();
+    let history = check.history(CASE).unwrap();
+    assert_eq!((history[0].number, history[0].comment.as_str()), (2, "Saved (checked in automatically)"));
+    assert_eq!(check.status().unwrap().designs[0].status, remote::RemoteStatus::UpToDate);
+}

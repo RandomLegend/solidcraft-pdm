@@ -32,6 +32,12 @@ const THUMB_ASPECT: f32 = 1.6;
 const ROW_THUMB_WIDTHS: std::ops::RangeInclusive<f32> = 48.0..=240.0;
 const HISTORY_THUMB: egui::Vec2 = egui::vec2(80.0, 50.0);
 const MAX_RECENT: usize = 8;
+/// How long a saved design must stay unchanged before it is checked in automatically (so a
+/// save in progress is not caught half-way).
+const AUTO_CHECKIN_AFTER: Duration = Duration::from_secs(4);
+/// How often the vault is looked at while the window is in the background, with automatic
+/// check-in (the user is working in SolidCraft meanwhile).
+const AUTO_SCAN_EVERY: Duration = Duration::from_secs(6);
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -53,6 +59,8 @@ struct Settings {
     check_updates: bool,
     /// Dark, light, or as the system is.
     appearance: Appearance,
+    /// Saved designs become versions by themselves (one person's work: no manual check-in).
+    auto_checkin: bool,
     /// When that was last done (Unix seconds), and a version not to point out again.
     last_update_check: i64,
     skipped_update: String,
@@ -70,6 +78,7 @@ impl Default for Settings {
             servers: Vec::new(),
             check_updates: true,
             appearance: Appearance::System,
+            auto_checkin: false,
             last_update_check: 0,
             skipped_update: String::new(),
         }
@@ -287,6 +296,7 @@ enum Action {
     CheckForUpdates,
     SetUpdateChecks(bool),
     SetAppearance(Appearance),
+    SetAutoCheckin(bool),
     InstallUpdate,
     SkipUpdate,
 }
@@ -330,6 +340,8 @@ pub struct App {
     /// Updates: how this copy is installed, a check under way (asked for by the user: `true`),
     /// the newer release found, an installation under way.
     install_kind: update::Kind,
+    /// Automatic check-ins that failed, by path and content: not tried again until it changes.
+    auto_failed: HashSet<(String, Option<String>)>,
     update_check: Option<(Receiver<Result<update::Release, String>>, bool)>,
     update: Option<update::Release>,
     installing: Option<(Receiver<Result<PathBuf, String>>, Arc<update::Progress>)>,
@@ -373,6 +385,7 @@ impl App {
             dialog: None,
             focused: false,
             install_kind: update::Kind::detect(),
+            auto_failed: HashSet::new(),
             update_check: None,
             update: None,
             installing: None,
@@ -404,6 +417,11 @@ impl App {
     }
 
     /// The program that opens designs (as in Settings; empty: SolidCraft as installed).
+    /// Automatic check-in (as in the settings).
+    pub fn set_auto_checkin(&mut self, on: bool) {
+        self.settings.auto_checkin = on;
+    }
+
     pub fn set_open_command(&mut self, command: &str) {
         self.settings.open_command = command.trim().to_owned();
     }
@@ -509,6 +527,73 @@ impl App {
         }
     }
 
+    /// With automatic check-in: every saved design that has not changed for a moment becomes
+    /// a version (new designs too). In a server vault: changes the vault takes without a
+    /// check-out, and designs checked out by this user (which stay checked out).
+    fn auto_check_in(&mut self, ctx: &egui::Context) {
+        const COMMENT: &str = "Saved (checked in automatically)";
+        let settled = |modified: Option<SystemTime>| modified.and_then(|m| m.elapsed().ok()).is_some_and(|age| age >= AUTO_CHECKIN_AFTER);
+        let mut done = Vec::new();
+        let mut failed = Vec::new();
+        match self.backend.as_mut() {
+            Some(Backend::Local(vault)) => {
+                let due: Vec<(String, Option<String>)> = self
+                    .entries
+                    .iter()
+                    .filter(|e| matches!(e.status, Status::Modified | Status::Untracked) && settled(e.modified))
+                    .map(|e| (e.path.clone(), e.hash.clone()))
+                    .filter(|key| !self.auto_failed.contains(key))
+                    .collect();
+                for (path, hash) in due {
+                    match vault.check_in(&path, COMMENT) {
+                        Ok(v) => done.push(format!("{path} (v{})", v.number)),
+                        Err(vault::Error::Unchanged(_)) => {}
+                        Err(e) => {
+                            failed.push(format!("{path}: {e}"));
+                            self.auto_failed.insert((path, hash));
+                        }
+                    }
+                }
+            }
+            Some(Backend::Remote(_)) => {
+                use remote::RemoteStatus as R;
+                let due: Vec<(String, Option<String>, R)> = self
+                    .entries
+                    .iter()
+                    .filter(|e| settled(e.modified) && !self.auto_failed.contains(&(e.path.clone(), e.hash.clone())))
+                    .filter_map(|e| self.remote.get(&e.path).map(|r| (e.path.clone(), e.hash.clone(), r.status.clone())))
+                    .filter(|(_, _, s)| matches!(s, R::Changed | R::CheckedOut { modified: true } | R::LocalOnly))
+                    .collect();
+                let Some(mut ws) = self.backend.as_ref().and_then(|b| b.workspace()) else { return };
+                for (path, hash, status) in due {
+                    let result = match status {
+                        R::LocalOnly => ws.add(&path, COMMENT),
+                        R::CheckedOut { .. } => ws.checkin(&path, COMMENT, true),
+                        _ => ws.checkin(&path, COMMENT, false),
+                    };
+                    match result {
+                        Ok(v) => done.push(format!("{path} (v{})", v.number)),
+                        Err(e) => {
+                            failed.push(format!("{path}: {e}"));
+                            self.auto_failed.insert((path, hash));
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+        if !failed.is_empty() {
+            self.error(format!("Not checked in automatically: {}", failed.join("; ")));
+        } else if !done.is_empty() {
+            self.info_msg(format!("Checked in automatically: {}", done.join(", ")));
+        }
+        if !done.is_empty() {
+            self.load_history();
+            self.rescan = true;
+            self.start_scan(ctx);
+        }
+    }
+
     fn poll_scan(&mut self, ctx: &egui::Context) {
         let Some(rx) = &self.scan else { return };
         let Ok(result) = rx.try_recv() else { return };
@@ -547,6 +632,9 @@ impl App {
                     self.selected = None;
                 }
                 self.load_history();
+                if self.settings.auto_checkin {
+                    self.auto_check_in(ctx);
+                }
             }
             Err(e) if e == scan::LOGIN_NEEDED => {
                 if !matches!(self.dialog, Some(Dialog::Login { .. })) {
@@ -994,6 +1082,12 @@ impl App {
             Action::Refresh => self.start_scan(ctx),
             Action::CheckForUpdates => self.check_for_updates(ctx, true),
             Action::SetUpdateChecks(on) => self.settings.check_updates = on,
+            Action::SetAutoCheckin(on) => {
+                self.settings.auto_checkin = on;
+                if on {
+                    self.start_scan(ctx);
+                }
+            }
             Action::SetAppearance(choice) => {
                 self.settings.appearance = choice;
                 ctx.set_theme(choice.preference());
@@ -1253,6 +1347,7 @@ impl App {
                     ui.label(RichText::new(format!("v{server} on the server; you have v{base}")).color(t.accent));
                 }
             }
+            let required = self.backend.as_ref().and_then(|b| b.workspace().map(|w| w.checkout_required())).unwrap_or(true);
             let comment_box = |ui: &mut egui::Ui, comment: &mut String| {
                 ui.add(egui::TextEdit::multiline(comment).hint_text("What changed?").desired_rows(2).margin(egui::vec2(8.0, 6.0)).desired_width(f32::INFINITY));
             };
@@ -1270,8 +1365,14 @@ impl App {
                         actions.push(Action::Checkout(path.clone()));
                     }
                 }
-                R::UpToDate => {
+                R::UpToDate if required => {
                     if ui.add(theme::primary("Check out", t)).on_hover_text("Lock it for you, to change it").clicked() {
+                        actions.push(Action::Checkout(path.clone()));
+                    }
+                }
+                R::UpToDate => {
+                    // Saving it is enough here; a check-out only keeps others out meanwhile.
+                    if ui.add(theme::secondary("Check out")).on_hover_text("Not needed in this vault: only keeps others out while you work").clicked() {
                         actions.push(Action::Checkout(path.clone()));
                     }
                 }
@@ -1293,7 +1394,7 @@ impl App {
                 R::RemovedOnServer => {
                     ui.weak("No longer on the server (deleted or moved by someone).");
                 }
-                R::CheckedOut { .. } | R::LocalOnly => {}
+                R::CheckedOut { .. } | R::LocalOnly | R::Changed => {}
             });
             match &r.status {
                 R::CheckedOut { modified } => {
@@ -1312,6 +1413,12 @@ impl App {
                             actions.push(Action::UndoCheckout { path: path.clone(), discard: true });
                         }
                     });
+                }
+                R::Changed => {
+                    comment_box(ui, &mut self.comment);
+                    if ui.add(theme::primary("⬆ Check in", t)).on_hover_text("Uploads it as the next version").clicked() {
+                        actions.push(Action::RemoteCheckin { path: path.clone(), comment: self.comment.clone(), keep: false });
+                    }
                 }
                 R::LocalOnly => {
                     ui.label("Not on the server yet.");
@@ -2946,6 +3053,17 @@ impl App {
                     }
                     #[cfg(not(windows))]
                     menu_entry_settings(ui, actions);
+                    ui.label(RichText::new("Versions").font(theme::semibold(size::HEADING)));
+                    let mut auto = self.settings.auto_checkin;
+                    if ui.checkbox(&mut auto, "Check in automatically when a design is saved").changed() {
+                        actions.push(Action::SetAutoCheckin(auto));
+                    }
+                    ui.label(
+                        RichText::new("For one person: a saved design becomes the next version a few seconds later, new designs too. In a server vault where check-out is required, only designs you have checked out.")
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(10.0);
                     ui.label(RichText::new("Updates").font(theme::semibold(size::HEADING)));
                     ui.horizontal_wrapped(|ui| {
                         let mut on = self.settings.check_updates;
@@ -3018,6 +3136,12 @@ impl eframe::App for App {
         if focused {
             // Unfocused, nothing is scheduled: regaining focus rescans anyway.
             ctx.request_repaint_after(RESCAN_EVERY);
+        } else if self.settings.auto_checkin && self.backend.is_some() {
+            // In the background too: saves in SolidCraft become versions without coming back.
+            if self.last_scan.elapsed() >= AUTO_SCAN_EVERY {
+                self.start_scan(ctx);
+            }
+            ctx.request_repaint_after(AUTO_SCAN_EVERY);
         }
         self.settings.zoom = ctx.zoom_factor();
         if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
@@ -3461,6 +3585,7 @@ fn remote_style(status: &remote::RemoteStatus) -> (String, Color32) {
         R::CheckedOut { modified: true } => ("Checked out · changed".into(), t.warning),
         R::CheckedOutByOther(user) => (format!("Checked out by {user}"), t.other),
         R::ChangedWithoutCheckout => ("Changed, not checked out".into(), t.warning),
+        R::Changed => ("Changed".into(), t.warning),
         R::Conflict => ("Conflict".into(), t.error),
         R::LocalOnly => ("Not on the server".into(), t.accent),
         R::RemovedOnServer => ("Removed on the server".into(), t.error),

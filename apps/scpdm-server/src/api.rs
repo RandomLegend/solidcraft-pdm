@@ -195,7 +195,7 @@ async fn tree(State(server): State<Shared>, Auth(user, _): Auth, Path(name): Pat
             };
             images.push(Image { path: file.path, hash, size: file.size });
         }
-        Ok(Tree { counter, unchanged: false, designs, folders: vault.folders()?, images })
+        Ok(Tree { counter, unchanged: false, checkout_required: vault.checkout_required()?, designs, folders: vault.folders()?, images })
     })
     .await?;
     Ok(axum::Json(tree))
@@ -329,6 +329,8 @@ fn apply(vault: &mut Vault, user: &User, action: Action) -> Reply<Done> {
                         ApiError { by: Some(lock.user.clone()), ..ApiError::new(ErrorCode::Locked, format!("{path} is checked out by {}", lock.user)) },
                     ));
                 }
+                // A vault one person uses may do without check-outs.
+                None if !vault.checkout_required()? => {}
                 None => return Err(fail(StatusCode::CONFLICT, ErrorCode::NotCheckedOut, format!("check {path} out before checking it in"))),
             }
             let latest = vault.history(&path)?.into_iter().next().ok_or_else(|| fail(StatusCode::NOT_FOUND, ErrorCode::NotFound, path.clone()))?;

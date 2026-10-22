@@ -246,3 +246,40 @@ fn a_workspace_reopens_with_its_login() {
         assert_eq!(mode & 0o077, 0, "only the owner can read the login");
     }
 }
+
+#[test]
+fn a_vault_without_check_outs_takes_changes_directly() {
+    let data = tempfile::tempdir().unwrap();
+    let server = Server::open(data.path(), "Test").unwrap();
+    server.add_vault("workshop").unwrap();
+    vault::Vault::open(data.path().join("vaults/workshop")).unwrap().set_checkout_required(false).unwrap();
+    for user in ["anna", "ben"] {
+        server.accounts.add_user(user, &format!("{user}-password"), false).unwrap();
+        server.accounts.grant(user, "workshop", protocol::Access::Write).unwrap();
+    }
+    let url = scpdm_server::spawn_for_tests(server);
+    let (_a, mut anna) = workspace(&url, "anna", "anna-password");
+    let (_b, mut ben) = workspace(&url, "ben", "ben-password");
+    write(&anna, LID, &design("LID-1", 1));
+    anna.add(LID, "First lid").unwrap();
+    assert!(!anna.checkout_required());
+    assert!(!readonly(&anna.absolute(LID)), "no hint: nothing to check out");
+
+    // Saved in SolidCraft, checked in as it is.
+    write(&anna, LID, &design("LID-2", 2));
+    assert_eq!(status(&mut anna, LID), RemoteStatus::Changed);
+    let v2 = anna.checkin(LID, "Saved", false).unwrap();
+    assert_eq!(v2.number, 2);
+    assert!(!readonly(&anna.absolute(LID)));
+    assert_eq!(status(&mut anna, LID), RemoteStatus::UpToDate);
+
+    // A check-out still keeps others out, and an old base is still refused.
+    ben.get(LID).unwrap();
+    ben.checkout(LID).unwrap();
+    write(&anna, LID, &design("LID-3", 3));
+    assert_eq!(anna.checkin(LID, "mine", false).unwrap_err().code(), Some(ErrorCode::Locked));
+    write(&ben, LID, &design("LID-B", 4));
+    ben.checkin(LID, "Ben's", false).unwrap();
+    assert_eq!(status(&mut anna, LID), RemoteStatus::Conflict);
+    assert_eq!(anna.checkin(LID, "stale", false).unwrap_err().code(), Some(ErrorCode::Stale));
+}

@@ -163,6 +163,20 @@ impl Vault {
         })
     }
 
+    /// Whether a design must be checked out before it is checked in (on a server: so two people
+    /// cannot change it at once). Required unless switched off, as for a vault one person uses.
+    pub fn checkout_required(&self) -> Result<bool> {
+        let value: Option<String> =
+            self.db.query_row("SELECT value FROM settings WHERE key = 'checkout'", [], |r| r.get(0)).optional()?;
+        Ok(value.as_deref() != Some("optional"))
+    }
+
+    pub fn set_checkout_required(&mut self, required: bool) -> Result<()> {
+        let value = if required { "required" } else { "optional" };
+        self.db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('checkout', ?1)", [value])?;
+        Ok(())
+    }
+
     /// A consistent copy of the vault's database at `to` (a new file), while it stays in use.
     pub fn backup_db(&self, to: &std::path::Path) -> Result<()> {
         self.db.execute("VACUUM INTO ?1", [to.to_string_lossy()])?;

@@ -47,6 +47,7 @@ pub fn router() -> Router<Shared> {
         .route("/api/admin/users/{name}/access/{vault}", put(set_access))
         .route("/api/admin/vaults", get(vaults).post(add_vault))
         .route("/api/admin/vaults/{vault}/unlock", post(unlock))
+        .route("/api/admin/vaults/{vault}/checkout", put(set_checkout))
         .route("/api/admin/backups", get(backups))
         .route("/api/admin/backups/settings", put(backup_settings))
         .route("/api/admin/backups/run", post(back_up_now))
@@ -381,6 +382,8 @@ struct VaultRow {
     last_change: Option<i64>,
     /// Users with access of their own (administrators have it anyway).
     users: u64,
+    /// Whether designs must be checked out to be checked in.
+    checkout_required: bool,
 }
 
 async fn vaults(State(server): State<Shared>, Admin(..): Admin) -> Reply<axum::Json<Vec<VaultRow>>> {
@@ -390,8 +393,11 @@ async fn vaults(State(server): State<Shared>, Admin(..): Admin) -> Reply<axum::J
         let mut rows = Vec::new();
         for name in s.vault_names()? {
             let Some(shared) = s.shared(&name) else { continue };
-            let stats = shared.vault.lock().unwrap_or_else(|e| e.into_inner()).stats()?;
+            let held = shared.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let (stats, checkout_required) = (held.stats()?, held.checkout_required()?);
+            drop(held);
             rows.push(VaultRow {
+                checkout_required,
                 users: users.iter().filter(|u| u.access.contains_key(&name)).count() as u64,
                 name,
                 designs: stats.designs,
@@ -502,4 +508,22 @@ async fn back_up_now(State(server): State<Shared>, Admin(..): Admin) -> Reply<St
     let s = server.clone();
     tokio::task::spawn_blocking(move || s.back_up("page"));
     Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Deserialize)]
+struct CheckoutRule {
+    required: bool,
+}
+
+/// Whether the vault's designs must be checked out to be checked in (off: one person's vault).
+async fn set_checkout(State(server): State<Shared>, Admin(..): Admin, Path(vault): Path<String>, axum::Json(rule): axum::Json<CheckoutRule>) -> Reply<StatusCode> {
+    let shared = server.shared(&vault).ok_or_else(|| fail(StatusCode::NOT_FOUND, ErrorCode::NotFound, format!("no vault {vault}")))?;
+    with_vault(shared, move |vault, shared| {
+        vault.set_checkout_required(rule.required)?;
+        // Clients fetch the tree again and see the rule.
+        shared.counter.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }

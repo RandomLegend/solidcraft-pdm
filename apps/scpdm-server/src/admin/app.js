@@ -356,6 +356,15 @@ async function users() {
 
 async function vaults() {
   const list = await api("GET", "/api/admin/vaults");
+  const setCheckout = async (name, required) => {
+    try {
+      await api("PUT", `/api/admin/vaults/${encodeURIComponent(name)}/checkout`, { required });
+      toast(required ? `${name}: designs are checked out to be changed` : `${name}: changes are checked in without checking out`);
+    } catch (e) {
+      if (e.status !== 401) toast(e.message, true);
+    }
+    route();
+  };
   const addVault = () => dialog("Add a vault", [
     h("label", { for: "n" }, "Name"), h("input", { id: "n", name: "name", required: true, pattern: "[A-Za-z0-9._\\-]+", title: "letters, digits, . _ -" }),
   ], "Add vault", async (v) => {
@@ -368,7 +377,7 @@ async function vaults() {
     h("div", { class: "panel wide" }, list.length === 0 ? h("div", { class: "empty" }, "No vaults yet.") : h("table", {},
       h("thead", {}, h("tr", {}, h("th", {}, "Vault"), h("th", { class: "num" }, "Designs"), h("th", { class: "num" }, "Versions"),
         h("th", { class: "num" }, "Releases"), h("th", { class: "num" }, "Checked out"), h("th", { class: "num" }, "Stored"),
-        h("th", { class: "num" }, "Users"), h("th", {}, "Last change"))),
+        h("th", { class: "num" }, "Users"), h("th", {}, "Last change"), h("th", {}, "Check-out"))),
       h("tbody", {}, list.map((v) => h("tr", {},
         h("td", {}, h("b", {}, v.name)),
         h("td", { class: "num" }, v.designs),
@@ -377,8 +386,14 @@ async function vaults() {
         h("td", { class: "num" }, v.checked_out),
         h("td", { class: "num" }, bytes(v.stored_bytes)),
         h("td", { class: "num" }, v.users),
-        h("td", { class: "muted small", title: v.last_change ? when(v.last_change) : null }, v.last_change ? ago(v.last_change) : "never")))))),
-    h("p", { class: "muted small" }, "Users with access of their own; administrators may use every vault."),
+        h("td", { class: "muted small", title: v.last_change ? when(v.last_change) : null }, v.last_change ? ago(v.last_change) : "never"),
+        h("td", {}, h("select", {
+          class: "compact",
+          "aria-label": `Check-out in ${v.name}`,
+          title: "Required: one person at a time changes a design (a team). Optional: changes are checked in without checking out (one person).",
+          onchange: (e) => setCheckout(v.name, e.target.value === "required"),
+        }, h("option", { value: "required", selected: v.checkout_required }, "required"), h("option", { value: "optional", selected: !v.checkout_required }, "optional")))))))),
+    h("p", { class: "muted small" }, "Users: with access of their own; administrators may use every vault. Check-out: required for a team (one person changes a design at a time); optional for a vault one person uses."),
   ];
 }
 

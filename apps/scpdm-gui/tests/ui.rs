@@ -628,3 +628,36 @@ fn edits_design_properties() {
     let history = Vault::open(&root).unwrap().history("enclosure/pi4-lid.solidcraft").unwrap();
     assert_eq!((history[0].number, history[0].comment.as_str()), (3, "Edited properties"));
 }
+
+/// Makes a file look saved `secs` seconds ago.
+fn saved_ago(file: &Path, secs: u64) {
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    fs::File::options().write(true).open(file).unwrap().set_modified(when).unwrap();
+}
+
+#[test]
+fn checks_in_by_itself_when_asked_to() {
+    let (_dir, root, mut harness) = open_demo();
+    harness.state_mut().set_auto_checkin(true);
+    // Saved a while ago: the modified case and the new screw; the lid was saved just now.
+    saved_ago(&root.join("enclosure/pi4-case.solidcraft"), 30);
+    saved_ago(&root.join("parts/fasteners/m3-screw.solidcraft"), 30);
+    fs::write(root.join("enclosure/pi4-lid.solidcraft"), fixture("container-cubeish.solidcraft")).unwrap();
+    harness.key_press(egui::Key::F5);
+    settle(&mut harness);
+    settle(&mut harness);
+
+    let vault = Vault::open(&root).unwrap();
+    let case = vault.history("enclosure/pi4-case.solidcraft").unwrap();
+    assert_eq!((case.len(), case[0].comment.as_str()), (2, "Saved (checked in automatically)"));
+    assert_eq!(vault.history("parts/fasteners/m3-screw.solidcraft").unwrap().len(), 1, "new designs too");
+    assert_eq!(vault.history("enclosure/pi4-lid.solidcraft").unwrap().len(), 2, "not while it may still be saving");
+    harness.get_by_label_contains("Checked in automatically:");
+
+    // A moment later it is taken too.
+    saved_ago(&root.join("enclosure/pi4-lid.solidcraft"), 30);
+    harness.key_press(egui::Key::F5);
+    settle(&mut harness);
+    settle(&mut harness);
+    assert_eq!(Vault::open(&root).unwrap().history("enclosure/pi4-lid.solidcraft").unwrap().len(), 3);
+}

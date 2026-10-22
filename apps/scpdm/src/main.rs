@@ -602,6 +602,7 @@ fn remote_command(command: RemoteCommand) -> Result {
                     RemoteStatus::CheckedOut { modified: false } => "checked out".to_owned(),
                     RemoteStatus::CheckedOutByOther(user) => format!("checked out by {user}"),
                     RemoteStatus::ChangedWithoutCheckout => "changed, not checked out".to_owned(),
+                    RemoteStatus::Changed => "changed".to_owned(),
                     RemoteStatus::Conflict => "CONFLICT: changed here and on the server".to_owned(),
                     RemoteStatus::LocalOnly => "new here (add it)".to_owned(),
                     RemoteStatus::RemovedOnServer => "no longer on the server".to_owned(),

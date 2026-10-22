@@ -64,6 +64,8 @@ pub enum RemoteStatus {
     CheckedOutByOther(String),
     /// Changed here, but not checked out by you.
     ChangedWithoutCheckout,
+    /// Changed here, in a vault that needs no check-out: ready to be checked in.
+    Changed,
     /// Changed here, and changed on the server too: check out and compare, or keep a copy.
     Conflict,
     /// A design here that is not on the server yet: add it.
@@ -276,6 +278,10 @@ impl Workspace {
                 }
             }
             let status = self.status_of(server.as_ref(), base.as_ref(), local_hash.as_deref());
+            if !self.checkout_required() && local_hash.is_some() {
+                // Read-only from when check-outs were required.
+                set_readonly(&self.absolute(&path), false);
+            }
             out.push(RemoteEntry {
                 path,
                 status,
@@ -289,6 +295,16 @@ impl Workspace {
         Ok(out)
     }
 
+    /// Whether the vault wants designs checked out before they are checked in.
+    pub fn checkout_required(&self) -> bool {
+        self.state.tree.checkout_required
+    }
+
+    /// Makes a file read-only as the hint that it is not checked out; without check-outs, never.
+    fn hint(&self, file: &Path, readonly: bool) {
+        set_readonly(file, readonly && self.checkout_required());
+    }
+
     fn status_of(&self, server: Option<&Design>, base: Option<&Base>, local: Option<&str>) -> RemoteStatus {
         let Some(s) = server else {
             return if base.is_some() { RemoteStatus::RemovedOnServer } else { RemoteStatus::LocalOnly };
@@ -300,6 +316,7 @@ impl Workspace {
         match (mine, modified, stale) {
             (_, true, true) => RemoteStatus::Conflict,
             (true, modified, _) => RemoteStatus::CheckedOut { modified },
+            (false, true, false) if !self.checkout_required() => RemoteStatus::Changed,
             (false, true, false) => RemoteStatus::ChangedWithoutCheckout,
             (false, false, _) if s.lock.is_some() => RemoteStatus::CheckedOutByOther(s.lock.as_ref().map(|l| l.user.clone()).unwrap_or_default()),
             (false, false, true) => RemoteStatus::NewerOnServer,
@@ -383,7 +400,7 @@ impl Workspace {
         if matches!(status, RemoteStatus::NotDownloaded) || self.is_old_and_unchanged(path)? {
             self.get(path)?;
         }
-        set_readonly(&self.absolute(path), false);
+        self.hint(&self.absolute(path), false);
         self.save()
     }
 
@@ -399,7 +416,7 @@ impl Workspace {
                 self.write(path, &bytes, true)?;
             }
         } else {
-            set_readonly(&self.absolute(path), true);
+            self.hint(&self.absolute(path), true);
         }
         self.save()
     }
@@ -414,7 +431,7 @@ impl Workspace {
         let done = self.client.act(&self.state.vault, &action)?;
         let version = done.version.ok_or_else(|| Error::Local("the server recorded no version".into()))?;
         self.state.files.insert(path.to_owned(), Base { id: base.id, version: version.number, hash: version.hash.clone() });
-        set_readonly(&self.absolute(path), !keep_checked_out);
+        self.hint(&self.absolute(path), !keep_checked_out);
         self.refresh_tree()?;
         Ok(version)
     }
@@ -428,7 +445,7 @@ impl Workspace {
         self.refresh_tree()?;
         let id = self.server_design(path).map_or(0, |d| d.id);
         self.state.files.insert(path.to_owned(), Base { id, version: version.number, hash: version.hash.clone() });
-        set_readonly(&self.absolute(path), true);
+        self.hint(&self.absolute(path), true);
         self.save()?;
         Ok(version)
     }
@@ -573,7 +590,7 @@ impl Workspace {
         let tmp = file.with_file_name(format!(".{}.pdm-get", file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
         fs::write(&tmp, bytes)?;
         fs::rename(&tmp, &file)?;
-        set_readonly(&file, readonly);
+        self.hint(&file, readonly);
         self.state.stat.remove(path);
         Ok(())
     }

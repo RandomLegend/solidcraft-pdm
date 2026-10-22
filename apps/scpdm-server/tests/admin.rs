@@ -230,3 +230,22 @@ fn backups_are_set_up_and_run_from_the_page() {
     let (_, o) = s.get(&cookie, "/api/admin/overview");
     assert_eq!((o["backup"]["enabled"].as_bool(), o["backup"]["last"]["ok"].as_bool()), (Some(true), Some(true)));
 }
+
+#[test]
+fn check_outs_can_be_made_optional_per_vault() {
+    let s = setup();
+    let cookie = cookie_pair(&s.page_login("root", "root-password").1.unwrap());
+    let (_, vaults) = s.get(&cookie, "/api/admin/vaults");
+    assert_eq!(vaults[0]["checkout_required"].as_bool(), Some(true), "required by default");
+    let rule = json!({"required": false});
+    assert_eq!(s.send(&cookie, "PUT", "/api/admin/vaults/workshop/checkout", rule.clone(), false), 403, "needs the header");
+    assert_eq!(s.send(&cookie, "PUT", "/api/admin/vaults/nowhere/checkout", rule.clone(), true), 404);
+    assert_eq!(s.send(&cookie, "PUT", "/api/admin/vaults/workshop/checkout", rule, true), 204);
+    let (_, vaults) = s.get(&cookie, "/api/admin/vaults");
+    assert_eq!(vaults[0]["checkout_required"].as_bool(), Some(false));
+
+    // The app sees it in the vault's tree.
+    let ben = s.app_login("ben", "ben-password");
+    let mut r = s.agent.get(&format!("{}/api/vaults/workshop/tree", s.url)).header("Authorization", &format!("Bearer {ben}")).call().unwrap();
+    assert_eq!(r.body_mut().read_json::<Value>().unwrap()["checkout_required"].as_bool(), Some(false));
+}

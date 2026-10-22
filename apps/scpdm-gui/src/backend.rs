@@ -284,7 +284,9 @@ pub fn vault_status(s: &RemoteStatus) -> vault::Status {
         RemoteStatus::UpToDate | RemoteStatus::NewerOnServer | RemoteStatus::CheckedOut { modified: false } | RemoteStatus::CheckedOutByOther(_) => {
             vault::Status::Current
         }
-        RemoteStatus::CheckedOut { modified: true } | RemoteStatus::ChangedWithoutCheckout | RemoteStatus::Conflict => vault::Status::Modified,
+        RemoteStatus::CheckedOut { modified: true } | RemoteStatus::ChangedWithoutCheckout | RemoteStatus::Changed | RemoteStatus::Conflict => {
+            vault::Status::Modified
+        }
         RemoteStatus::LocalOnly => vault::Status::Untracked,
         RemoteStatus::NotDownloaded | RemoteStatus::RemovedOnServer => vault::Status::Missing,
     }
