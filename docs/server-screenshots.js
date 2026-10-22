@@ -26,6 +26,8 @@ const base = "http://pdm.workshop.lan:7380";
   await page.screenshot({ path: `${out}/server-dashboard.png` });
 
   await page.goto(`${base}/admin/#/users`);
+  // The users page itself, not the dashboard still on screen.
+  await page.waitForSelector("h1:text-is('Users')");
   await page.waitForSelector("tbody tr");
   // Down to the table: the rest of the page is empty.
   const table = await page.locator(".panel").boundingBox();

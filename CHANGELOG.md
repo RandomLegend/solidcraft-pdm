@@ -3,7 +3,7 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
-## Unreleased
+## 0.2.3 — 2026-10-22
 
 ### App
 
