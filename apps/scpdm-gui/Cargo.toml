@@ -32,5 +32,6 @@ egui_kittest = { workspace = true }
 tempfile = { workspace = true }
 zip = { workspace = true }
 
-[target.'cfg(windows)'.build-dependencies]
+[build-dependencies]
+# Used for Windows builds only (also cross-built on Linux), see build.rs.
 winresource = "0.1"

@@ -105,7 +105,9 @@ it into your launcher, with its icon. The AppImage looks for a new release once 
 when you agree, replaces itself with it (checked against the release's `SHA256SUMS`) and
 restarts; see the [guide](docs/guide.md#updates).
 
-Windows 10 / 11: prepared, built by hand in CI; see [docs/windows.md](docs/windows.md).
+Windows 10 / 11: the installer `SolidCraft-PDM-*-setup.exe` from the same
+[releases](https://gitlab.com/randomlegend/solidcraft-pdm/-/releases) (new, not tried much on
+Windows yet; see [docs/windows.md](docs/windows.md)).
 
 The team server: see [Team server](#team-server).
 

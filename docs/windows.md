@@ -1,9 +1,33 @@
 # Building for Windows 10 / 11
 
-Status: the code is prepared for Windows, but it has **not been compiled or run on Windows
-yet**. The development machine has no Windows toolchain. The first build on Windows is the test.
+Status: every release has a Windows installer, `SolidCraft-PDM-<version>-setup.exe`, built on
+Linux for Windows. The programs have **not been tried on a real Windows machine yet**; the first
+install there is the test. Under Wine the command line program works (vault, check-in, log).
 
-## Build (on Windows)
+## How releases build it
+
+On the project's Linux runner (`.gitlab-ci.yml`, jobs `release:windows` and `release:installer`;
+on branches `windows:build` by hand, then `windows:installer`):
+
+1. `cargo build --release --target x86_64-pc-windows-gnu -p scpdm-gui -p scpdm` with MinGW
+   (`apt install mingw-w64`, `rustup target add x86_64-pc-windows-gnu`): no Microsoft SDK is
+   needed, and the programs use only DLLs every Windows 10 / 11 has. `apps/scpdm-gui/build.rs`
+   adds the icon and version information (MinGW's `windres`). The programs are stripped.
+2. Inno Setup 6 in Wine (the Docker image `amake/innosetup`, pinned) makes the installer from
+   `packaging/windows/solidcraft-pdm.iss` (`/DBinDir=..\..\dist\windows`).
+3. `release:files` puts it into the release with the AppImage, listed in `SHA256SUMS`, so the
+   installed app can update itself from the next release on.
+
+The same by hand on Linux, from the project folder:
+
+```sh
+cargo build --release --target x86_64-pc-windows-gnu -p scpdm-gui -p scpdm
+mkdir -p dist/windows && cp target/x86_64-pc-windows-gnu/release/{solidcraft-pdm,scpdm}.exe dist/windows/
+docker run --rm -v "$PWD:/work" -w /work amake/innosetup:innosetup6 \
+  /DAppVersion=0.2.4 '/DBinDir=..\..\dist\windows' packaging/windows/solidcraft-pdm.iss
+```
+
+## Build on Windows
 
 1. Install Rust with `rustup-init.exe` from <https://rustup.rs> (the default
    `x86_64-pc-windows-msvc` toolchain).
@@ -17,21 +41,12 @@ yet**. The development machine has no Windows toolchain. The first build on Wind
    cargo test --workspace
    ```
 
-   The app is `target\release\solidcraft-pdm.exe`, the command line `target\release\scpdm.exe`.
+   The app is `target\release\solidcraft-pdm.exe`, the command line `target\release\scpdm.exe`;
+   Inno Setup's `ISCC.exe /DAppVersion=0.2.4 packaging\windows\solidcraft-pdm.iss` makes the
+   installer.
 
 The tests that use a shell script as a stand-in for SolidCraft are Unix-only and are skipped.
 The screenshot mode of the UI tests (`SCPDM_SCREENSHOTS`) needs a GPU adapter.
-
-## CI
-
-`.gitlab-ci.yml` has a job that builds and tests on gitlab.com's Windows runners
-(`saas-windows-medium-amd64`). It only runs when you start it by hand (the play button of
-`windows:build` in the pipeline view), because it takes long; the pipeline does not wait for it.
-To build Windows releases automatically later, add `- if: $CI_COMMIT_TAG` above `- when: manual`
-in its `rules`. The job installs Rust 1.93.1 with rustup. Its artifact
-`solidcraft-pdm-windows-<commit>` holds `solidcraft-pdm.exe`, `scpdm.exe` and
-`SolidCraft-PDM-<version>-setup.exe` (kept 30 days).
-The Linux job runs the tests on every push.
 
 ## What is Windows-specific
 

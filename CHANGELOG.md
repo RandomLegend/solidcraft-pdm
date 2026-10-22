@@ -5,6 +5,12 @@ whose heading starts with `## <version>`.
 
 ## Unreleased
 
+### Windows
+
+- Every release has a Windows installer (`SolidCraft-PDM-<version>-setup.exe`), built on
+  Linux; the installed app updates itself from the following release on. Not tried on a real
+  Windows machine yet: see [docs/windows.md](docs/windows.md).
+
 ### App
 
 - Designs can be deleted (right-click, or *···* in the details). In a vault of your own they

@@ -6,6 +6,10 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
+; Where the two programs are (CI builds them on Linux for Windows: /DBinDir=..\..\dist\windows).
+#ifndef BinDir
+  #define BinDir "..\..\target\release"
+#endif
 
 [Setup]
 ; Never change the AppId: it identifies the app for updates and uninstalling.
@@ -33,8 +37,8 @@ WizardStyle=modern
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
-Source: "..\..\target\release\solidcraft-pdm.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\..\target\release\scpdm.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\solidcraft-pdm.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\scpdm.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\docs\windows.md"; DestDir: "{app}"; Flags: ignoreversion
 ; The interface fonts (IBM Plex) are built into the program; their licence goes along.

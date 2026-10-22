@@ -1,18 +1,20 @@
-# CI for gitlab.com:
+# CI (on the project's own runner, a Linux machine with Docker):
 # - linux:test       the tests, on every push
 # - linux:appimage   SolidCraft-PDM-<version>-x86_64.AppImage, automatically on the default
 #                    branch when the push changes the app (see its rules), otherwise and on
 #                    other branches by hand (kept 30 days)
-# - windows:build    solidcraft-pdm.exe, scpdm.exe, the installer and the tests on Windows: only when
-#                    started by hand (play button in the pipeline), since it takes long; the
-#                    pipeline does not wait for it
+# - windows:build    solidcraft-pdm.exe and scpdm.exe, built on Linux for Windows (MinGW), then
+#   windows:installer  SolidCraft-PDM-<version>-setup.exe (Inno Setup in Wine): by hand on
+#                    branches (kept 30 days)
 #
 # A tag vX.Y.Z (see "Releasing" in the README) makes a GitLab release:
 # - release:check    the tag matches the version in Cargo.toml and CHANGELOG.md has its section
-# - release:appimage the AppImage, the server for Linux (scpdm-server-<version>-x86_64-linux)
-#                    and their SHA256SUMS (which the app's updates check), kept for good
+# - release:appimage the AppImage and the server for Linux (scpdm-server-<version>-x86_64-linux)
+# - release:windows, release:installer   the Windows programs and their installer
 # - release:docker   the server's Docker image: registry.gitlab.com/<project>/server:<version>
 #                    and :latest
+# - release:files    the downloads together, with their SHA256SUMS (which the app's updates
+#                    check), kept for good
 # - release          the release, with the changelog section as notes and the files as downloads
 
 # A version commit ("Version 0.2.4") on a branch gets no pipeline: its release tag, pushed right
@@ -122,20 +124,114 @@ release:appimage:
     - packaging/linux/build-appimage.sh dist
     - cargo build --release --locked -p scpdm-server
     - cp target/release/scpdm-server "dist/scpdm-server-${CI_COMMIT_TAG#v}-x86_64-linux"
-    # The app checks what it downloads for an update against this.
-    - (cd dist && sha256sum *.AppImage scpdm-server-* > SHA256SUMS && cat SHA256SUMS)
-    - echo "APPIMAGE_JOB_ID=$CI_JOB_ID" > appimage.env
-    - echo "APPIMAGE_FILE=$(basename dist/*.AppImage)" >> appimage.env
-    - echo "SERVER_FILE=$(basename dist/scpdm-server-*)" >> appimage.env
   artifacts:
     name: solidcraft-pdm-linux-$CI_COMMIT_TAG
     paths:
       - dist/*.AppImage
       - dist/scpdm-server-*
+    # release:files keeps them for good.
+    expire_in: 1 week
+
+# Built on Linux for Windows: MinGW (no Microsoft SDK needed); the programs need only DLLs
+# every Windows has. The icon and version information come from build.rs (windres).
+.windows:
+  stage: build
+  image: rust:1.93-bookworm
+  needs: ["linux:test"]
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo-home
+  cache:
+    key: windows-gnu-$RUST_VERSION
+    paths:
+      - .cargo-home/registry/
+      - target/
+  script:
+    - apt-get update -qq && apt-get install -y -qq mingw-w64 > /dev/null
+    - rustup target add x86_64-pc-windows-gnu
+    - cargo build --release --locked --target x86_64-pc-windows-gnu -p scpdm-gui -p scpdm
+    - mkdir -p dist/windows
+    - cp target/x86_64-pc-windows-gnu/release/solidcraft-pdm.exe target/x86_64-pc-windows-gnu/release/scpdm.exe dist/windows/
+    - x86_64-w64-mingw32-strip dist/windows/*.exe
+    - ls -la dist/windows
+  artifacts:
+    name: solidcraft-pdm-windows-$CI_COMMIT_SHORT_SHA
+    paths:
+      - dist/windows/
+    expire_in: 1 week
+
+# The installer, from the programs above: Inno Setup 6 in Wine (the image pinned by digest).
+.installer:
+  stage: build
+  image:
+    name: amake/innosetup@sha256:81713b854eb12278021045dcb57701fe35312030b2dc1d37710184f294a23f81
+    entrypoint: [""]
+  script:
+    - version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+    - iscc "/DAppVersion=$version" '/DBinDir=..\..\dist\windows' packaging/windows/solidcraft-pdm.iss
+    - ls -la dist/*-setup.exe
+  artifacts:
+    name: solidcraft-pdm-windows-installer-$CI_COMMIT_SHORT_SHA
+    paths:
+      - dist/*-setup.exe
+    expire_in: 1 week
+
+windows:build:
+  extends: .windows
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: manual
+      allow_failure: true
+
+windows:installer:
+  extends: .installer
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: on_success
+  needs: ["windows:build"]
+
+release:windows:
+  extends: .windows
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  needs: ["linux:test", "release:check"]
+
+release:installer:
+  extends: .installer
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  needs: ["release:windows"]
+
+# Every download in one place (the release links them here), with their checksums.
+release:files:
+  stage: release
+  image: alpine:3.20
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  needs:
+    - job: release:appimage
+      artifacts: true
+    - job: release:installer
+      artifacts: true
+  script:
+    - rm -rf dist/windows
+    # The app checks what it downloads for an update against this.
+    - (cd dist && sha256sum *.AppImage scpdm-server-* *-setup.exe > SHA256SUMS && cat SHA256SUMS)
+    - echo "FILES_JOB_ID=$CI_JOB_ID" > files.env
+    - echo "APPIMAGE_FILE=$(basename dist/*.AppImage)" >> files.env
+    - echo "SERVER_FILE=$(basename dist/scpdm-server-*)" >> files.env
+    - echo "SETUP_FILE=$(basename dist/*-setup.exe)" >> files.env
+  artifacts:
+    name: solidcraft-pdm-$CI_COMMIT_TAG
+    paths:
+      - dist/*.AppImage
+      - dist/scpdm-server-*
+      - dist/*-setup.exe
       - dist/SHA256SUMS
     expire_in: never
     reports:
-      dotenv: appimage.env
+      dotenv: files.env
 
 release:docker:
   stage: build
@@ -162,25 +258,26 @@ release:
   needs:
     - job: release:check
       artifacts: true
-    # Its dotenv report (the AppImage's job and file) is an artifact: it must be passed.
-    - job: release:appimage
+    # Its dotenv report (the files' job and names) is an artifact: it must be passed.
+    - job: release:files
       artifacts: true
     - job: release:docker
       artifacts: false
   script:
     - apk add --no-cache curl jq
     - |
-      if [ -z "${APPIMAGE_JOB_ID:-}" ] || [ -z "${APPIMAGE_FILE:-}" ] || [ -z "${SERVER_FILE:-}" ]; then
-        echo "release:appimage did not pass APPIMAGE_JOB_ID, APPIMAGE_FILE and SERVER_FILE."
+      if [ -z "${FILES_JOB_ID:-}" ] || [ -z "${APPIMAGE_FILE:-}" ] || [ -z "${SERVER_FILE:-}" ] || [ -z "${SETUP_FILE:-}" ]; then
+        echo "release:files did not pass FILES_JOB_ID, APPIMAGE_FILE, SERVER_FILE and SETUP_FILE."
         exit 1
       fi
-    - files="$CI_PROJECT_URL/-/jobs/$APPIMAGE_JOB_ID/artifacts/raw/dist"
+    - files="$CI_PROJECT_URL/-/jobs/$FILES_JOB_ID/artifacts/raw/dist"
     - |
       jq -n --arg tag "$CI_COMMIT_TAG" --arg name "SolidCraft PDM ${CI_COMMIT_TAG#v}" \
-        --rawfile notes release-notes.md --arg file "$APPIMAGE_FILE" --arg server "$SERVER_FILE" --arg files "$files" \
+        --rawfile notes release-notes.md --arg file "$APPIMAGE_FILE" --arg server "$SERVER_FILE" --arg setup "$SETUP_FILE" --arg files "$files" \
         '{tag_name: $tag, name: $name, description: $notes,
           assets: {links: [
             {name: $file, url: ($files + "/" + $file), link_type: "package", direct_asset_path: ("/" + $file)},
+            {name: $setup, url: ($files + "/" + $setup), link_type: "package", direct_asset_path: ("/" + $setup)},
             {name: $server, url: ($files + "/" + $server), link_type: "package", direct_asset_path: ("/" + $server)},
             {name: "SHA256SUMS", url: ($files + "/SHA256SUMS"), link_type: "other", direct_asset_path: "/SHA256SUMS"}]}}' \
         > release.json
@@ -189,55 +286,3 @@ release:
       curl --fail-with-body --request POST --header "JOB-TOKEN: $CI_JOB_TOKEN" \
         --header "Content-Type: application/json" --data @release.json \
         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
-
-windows:build:
-  stage: build
-  needs: []
-  tags:
-    - saas-windows-medium-amd64
-  # Without a cache, installing Rust and building take about an hour.
-  timeout: 2h
-  variables:
-    CARGO_HOME: $CI_PROJECT_DIR\.cargo-home
-    RUSTUP_HOME: $CI_PROJECT_DIR\.rustup
-  cache:
-    key: windows-$RUST_VERSION
-    # Also after a failure: the build is most of the hour.
-    when: always
-    paths:
-      - .rustup/
-      - .cargo-home/bin/
-      - .cargo-home/registry/
-      - target/
-  rules:
-    - when: manual
-      allow_failure: true
-  before_script:
-    # Rust is not preinstalled; the Visual Studio Build Tools (linker, C compiler for the
-    # bundled SQLite) are.
-    - $env:Path = "$env:CARGO_HOME\bin;$env:Path"
-    - if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
-        Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe;
-        .\rustup-init.exe -y --no-modify-path --profile minimal --default-toolchain $env:RUST_VERSION;
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      }
-    - rustup default $env:RUST_VERSION
-    - rustc --version
-  script:
-    - cargo build --release --locked -p scpdm-gui -p scpdm
-    - if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Every failure at once, not only the first test file's.
-    - cargo test --workspace --locked --no-fail-fast
-    - if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    - New-Item -ItemType Directory -Force -Path dist | Out-Null
-    - Copy-Item target\release\solidcraft-pdm.exe, target\release\scpdm.exe, README.md, docs\windows.md -Destination dist
-    # The installer (Inno Setup 6, from Chocolatey, which the runner has).
-    - choco install innosetup -y --no-progress
-    - $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
-    - '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" packaging\windows\solidcraft-pdm.iss'
-    - if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-  artifacts:
-    name: solidcraft-pdm-windows-$CI_COMMIT_SHORT_SHA
-    paths:
-      - dist/
-    expire_in: 30 days
