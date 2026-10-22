@@ -304,6 +304,7 @@ fn opened_lines(log: &Path, n: usize) -> Vec<String> {
 }
 
 /// Two clicks in a row (raw events: `drop_at` would also take the pointer away in between).
+#[cfg_attr(not(unix), allow(dead_code))] // its tests use a shell script
 fn double_click_at<S>(harness: &mut Harness<'_, S>, pos: egui::Pos2) {
     harness.hover_at(pos);
     harness.step();

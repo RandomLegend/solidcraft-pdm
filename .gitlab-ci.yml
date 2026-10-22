@@ -191,6 +191,8 @@ windows:build:
     RUSTUP_HOME: $CI_PROJECT_DIR\.rustup
   cache:
     key: windows-$RUST_VERSION
+    # Also after a failure: the build is most of the hour.
+    when: always
     paths:
       - .rustup/
       - .cargo-home/bin/
@@ -213,7 +215,8 @@ windows:build:
   script:
     - cargo build --release --locked -p scpdm-gui -p scpdm
     - if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    - cargo test --workspace --locked
+    # Every failure at once, not only the first test file's.
+    - cargo test --workspace --locked --no-fail-fast
     - if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - New-Item -ItemType Directory -Force -Path dist | Out-Null
     - Copy-Item target\release\solidcraft-pdm.exe, target\release\scpdm.exe, README.md, docs\windows.md -Destination dist

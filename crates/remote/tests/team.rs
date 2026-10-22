@@ -61,11 +61,19 @@ fn team() -> Team {
     Team { _dirs: vec![data, a, b], url, anna, ben }
 }
 
-/// Writes a file in a workspace like SolidCraft does: a new file renamed over the old one
-/// (which works on a read-only file too).
+/// Writes a file in a workspace like SolidCraft does: a new file renamed over the old one.
+/// That works on a read-only file on Unix; on Windows someone would first have to clear the
+/// read-only flag (which is the hint that it is not checked out), as done here.
 fn write(ws: &Workspace, path: &str, text: &str) {
     let file = ws.absolute(path);
     fs::create_dir_all(file.parent().unwrap()).unwrap();
+    #[cfg(windows)]
+    if let Ok(meta) = fs::metadata(&file) {
+        let mut perms = meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&file, perms).unwrap();
+    }
     let tmp = file.with_extension("tmp");
     fs::write(&tmp, text).unwrap();
     fs::rename(&tmp, &file).unwrap();
