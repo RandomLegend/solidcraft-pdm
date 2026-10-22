@@ -67,6 +67,26 @@ New designs are written as plain JSON in format 1, which every SolidCraft releas
 upgrades (checked with SolidCraft 0.18.3: it saves such a file as a `solidcraft/29` container
 and keeps its properties).
 
+## Checking in automatically
+
+For one person, checking in by hand is often one step too many. *Vault > Settings > Versions >
+Check in automatically*: a design you saved in SolidCraft becomes the next version a few
+seconds later (the comment says it was checked in automatically), new designs in the vault
+too, also while the PDM is in the background. In a server vault this happens where check-out
+is optional (see [server.md](server.md)), and for designs you have checked out, which stay
+checked out.
+
+## Thumbnails
+
+SolidCraft saves a small picture in each design. The PDM draws better ones with SolidCraft
+itself (`solidcraft-cli`), shaded with the model's edges outlined, as on SolidCraft's start
+page, while the saved picture is shown until then. It finds SolidCraft's command line program
+on `PATH`, next to SolidCraft, or in SolidCraft's AppImage (taken out once, into the cache);
+`SCPDM_SOLIDCRAFT_CLI` names it otherwise. Each version is drawn once, about a second each,
+and kept in `~/.cache/solidcraft-pdm/thumbnails` (Windows: `%LOCALAPPDATA%\SolidCraft PDM`). A
+design that this SolidCraft cannot read (a newer format) keeps its saved picture.
+*Settings > Thumbnails* switches the drawing off.
+
 ## Updates
 
 The AppImage and the Windows installation look for a new release once a day (asking

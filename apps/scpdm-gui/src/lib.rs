@@ -4,6 +4,7 @@ pub mod app;
 mod backend;
 pub mod icons;
 mod launcher;
+mod render;
 #[cfg(not(windows))]
 mod menu_entry;
 mod scan;

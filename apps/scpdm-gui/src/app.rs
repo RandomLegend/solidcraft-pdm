@@ -61,6 +61,8 @@ struct Settings {
     appearance: Appearance,
     /// Saved designs become versions by themselves (one person's work: no manual check-in).
     auto_checkin: bool,
+    /// Thumbnails drawn by SolidCraft with outlined edges (else the ones saved in the files).
+    draw_thumbnails: bool,
     /// When that was last done (Unix seconds), and a version not to point out again.
     last_update_check: i64,
     skipped_update: String,
@@ -79,6 +81,7 @@ impl Default for Settings {
             check_updates: true,
             appearance: Appearance::System,
             auto_checkin: false,
+            draw_thumbnails: true,
             last_update_check: 0,
             skipped_update: String::new(),
         }
@@ -297,6 +300,7 @@ enum Action {
     SetUpdateChecks(bool),
     SetAppearance(Appearance),
     SetAutoCheckin(bool),
+    SetDrawThumbnails(bool),
     InstallUpdate,
     SkipUpdate,
 }
@@ -342,6 +346,9 @@ pub struct App {
     install_kind: update::Kind,
     /// Automatic check-ins that failed, by path and content: not tried again until it changes.
     auto_failed: HashSet<(String, Option<String>)>,
+    /// SolidCraft drawing thumbnails, and its pictures by content hash (`None`: could not).
+    renderer: Option<crate::render::Renderer>,
+    rendered: HashMap<String, Option<Arc<[u8]>>>,
     update_check: Option<(Receiver<Result<update::Release, String>>, bool)>,
     update: Option<update::Release>,
     installing: Option<(Receiver<Result<PathBuf, String>>, Arc<update::Progress>)>,
@@ -386,10 +393,16 @@ impl App {
             focused: false,
             install_kind: update::Kind::detect(),
             auto_failed: HashSet::new(),
+            renderer: None,
+            rendered: HashMap::new(),
             update_check: None,
             update: None,
             installing: None,
         };
+        // Not without stored settings (the tests): they show the thumbnails saved in the files.
+        if cc.storage.is_some() && app.settings.draw_thumbnails {
+            app.start_renderer(&cc.egui_ctx);
+        }
         let due = now_secs() - app.settings.last_update_check >= 24 * 3600;
         if app.settings.check_updates && app.install_kind.checks() && due {
             app.check_for_updates(&cc.egui_ctx, false);
@@ -685,14 +698,50 @@ impl App {
     }
 
     /// The thumbnail of a working file, or of its latest version when the file is missing.
+    fn start_renderer(&mut self, ctx: &egui::Context) {
+        // The program designs open with (an AppImage, or solidcraft next to solidcraft-cli).
+        let solidcraft = self.launcher().and_then(|l| l.command.first().map(PathBuf::from));
+        self.renderer = crate::render::Renderer::start(ctx, solidcraft);
+    }
+
+    /// SolidCraft's own picture of the content `hash` (with outlined edges), if drawn; asks
+    /// for it otherwise (`source`: what to draw).
+    fn drawn(&mut self, hash: &str, source: impl FnOnce(&Self) -> Option<crate::render::Source>) -> Option<egui::Image<'static>> {
+        if !self.rendered.contains_key(hash) {
+            let renderer = self.renderer.as_ref()?;
+            match renderer.cached(hash) {
+                Some(png) => {
+                    self.rendered.insert(hash.to_owned(), Some(png));
+                }
+                None => {
+                    let source = source(self);
+                    self.renderer.as_mut()?.request(hash, || source);
+                    return None;
+                }
+            }
+        }
+        let png = self.rendered.get(hash)?.clone()?;
+        Some(egui::Image::from_bytes(format!("bytes://drawn-{hash}.png"), egui::load::Bytes::Shared(png)))
+    }
+
     fn entry_thumb(&mut self, entry: &Entry) -> Option<egui::Image<'static>> {
         match &entry.hash {
-            Some(hash) => self.image(hash),
+            Some(hash) => {
+                let file = self.backend.as_ref().map(|b| b.absolute(&entry.path));
+                if let Some(image) = self.drawn(hash, |_| file.map(crate::render::Source::File)) {
+                    return Some(image);
+                }
+                self.image(hash)
+            }
             None => self.version_thumb(entry.latest.as_ref()?),
         }
     }
 
     fn version_thumb(&mut self, version: &Version) -> Option<egui::Image<'static>> {
+        let v = version.clone();
+        if let Some(image) = self.drawn(&version.hash, |app| app.backend.as_ref()?.version_bytes(&v).ok().map(crate::render::Source::Bytes)) {
+            return Some(image);
+        }
         let key = version.thumbnail.as_ref()?;
         if !self.thumbs.contains_key(key) {
             let png = self.backend.as_ref().and_then(|b| b.thumbnail(version)).map(Arc::from);
@@ -1082,6 +1131,14 @@ impl App {
             Action::Refresh => self.start_scan(ctx),
             Action::CheckForUpdates => self.check_for_updates(ctx, true),
             Action::SetUpdateChecks(on) => self.settings.check_updates = on,
+            Action::SetDrawThumbnails(on) => {
+                self.settings.draw_thumbnails = on;
+                self.rendered.clear();
+                self.renderer = None;
+                if on {
+                    self.start_renderer(ctx);
+                }
+            }
             Action::SetAutoCheckin(on) => {
                 self.settings.auto_checkin = on;
                 if on {
@@ -3064,6 +3121,22 @@ impl App {
                             .weak(),
                     );
                     ui.add_space(10.0);
+                    ui.label(RichText::new("Thumbnails").font(theme::semibold(size::HEADING)));
+                    let mut draw = self.settings.draw_thumbnails;
+                    if ui.checkbox(&mut draw, "Draw them with SolidCraft, with the edges outlined").changed() {
+                        actions.push(Action::SetDrawThumbnails(draw));
+                    }
+                    let found = self.renderer.as_ref().map(|r| r.found());
+                    let note = match found {
+                        Some(crate::render::Found::Program(p)) => format!("Drawn by {}. Kept in the cache, each version once.", p.display()),
+                        Some(crate::render::Found::Missing) => {
+                            "SolidCraft's command line program (solidcraft-cli) was not found: the pictures saved in the files are shown. Set SCPDM_SOLIDCRAFT_CLI to it, or choose SolidCraft above.".to_owned()
+                        }
+                        Some(crate::render::Found::NotYet) => "Looked for when the first picture is needed.".to_owned(),
+                        None => "Off: the pictures saved in the files are shown.".to_owned(),
+                    };
+                    ui.label(RichText::new(note).small().weak());
+                    ui.add_space(10.0);
                     ui.label(RichText::new("Updates").font(theme::semibold(size::HEADING)));
                     ui.horizontal_wrapped(|ui| {
                         let mut on = self.settings.check_updates;
@@ -3128,6 +3201,11 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_scan(ctx);
         self.poll_updates(ctx);
+        if let Some(renderer) = self.renderer.as_mut() {
+            for (hash, png) in renderer.finished() {
+                self.rendered.insert(hash, png);
+            }
+        }
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if self.backend.is_some() && focused && (!self.focused || self.last_scan.elapsed() >= RESCAN_EVERY) {
             self.start_scan(ctx);
