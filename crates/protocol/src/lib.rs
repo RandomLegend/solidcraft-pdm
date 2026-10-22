@@ -91,6 +91,18 @@ pub struct ReleaseInfo {
     pub version: u32,
     pub released_at: i64,
     pub note: String,
+    /// Production files made from it (servers before 0.2.5: none).
+    #[serde(default)]
+    pub files: Vec<ReleaseFileInfo>,
+}
+
+/// A production file (STEP, STL, 3MF…) stored with a release, as `vault::ReleaseFile`; its
+/// bytes are the object `hash`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseFileInfo {
+    pub name: String,
+    pub hash: String,
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -161,6 +173,9 @@ pub enum Action {
     /// Deletes a design: it is gone for everyone, and kept on the server for a while (an
     /// administrator can restore it). Refused while someone else has it checked out.
     Delete { path: String },
+    /// Stores production files (uploaded before; `size` is ignored) with the release that is
+    /// `version` of the design (0.2.5).
+    ReleaseFiles { path: String, version: u32, files: Vec<ReleaseFileInfo> },
 }
 
 impl Action {
@@ -181,6 +196,7 @@ impl Action {
             Action::PutImage { .. } => "put-image",
             Action::DeleteImage { .. } => "delete-image",
             Action::Delete { .. } => "delete",
+            Action::ReleaseFiles { .. } => "release-files",
         }
     }
 }

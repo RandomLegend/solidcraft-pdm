@@ -136,6 +136,7 @@ impl Vault {
     fn purge(&mut self, ids: &[i64]) -> Result<usize> {
         let tx = self.db.transaction()?;
         for id in ids {
+            tx.execute("DELETE FROM release_files WHERE document_id = ?1", [id])?;
             tx.execute("DELETE FROM releases WHERE document_id = ?1", [id])?;
             tx.execute("DELETE FROM versions WHERE document_id = ?1", [id])?;
             tx.execute("DELETE FROM locks WHERE document_id = ?1", [id])?;
@@ -157,6 +158,11 @@ impl Vault {
             let (hash, thumbnail) = row?;
             keep.insert(hash);
             keep.extend(thumbnail);
+        }
+        drop(stmt);
+        let mut stmt = self.db.prepare("SELECT hash FROM release_files")?;
+        for hash in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            keep.insert(hash?);
         }
         drop(stmt);
         self.store.remove_unused(&keep, std::time::Duration::from_secs(24 * 3600))

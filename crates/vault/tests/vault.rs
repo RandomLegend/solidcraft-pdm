@@ -415,7 +415,7 @@ fn vaults_from_the_first_schema_are_upgraded() {
     // As the first version of the tool left it: no state, no releases, no settings.
     let db = rusqlite::Connection::open(dir.path().join(".pdm/vault.db")).unwrap();
     db.execute_batch(
-        "ALTER TABLE documents DROP COLUMN deleted_at; ALTER TABLE documents DROP COLUMN deleted_by; ALTER TABLE documents DROP COLUMN deleted_from; DROP TABLE locks; DROP TABLE releases; DROP TABLE settings; ALTER TABLE documents DROP COLUMN state; PRAGMA user_version = 1;",
+        "DROP TABLE release_files; ALTER TABLE documents DROP COLUMN deleted_at; ALTER TABLE documents DROP COLUMN deleted_by; ALTER TABLE documents DROP COLUMN deleted_from; DROP TABLE locks; DROP TABLE releases; DROP TABLE settings; ALTER TABLE documents DROP COLUMN state; PRAGMA user_version = 1;",
     )
     .unwrap();
     drop(db);
@@ -492,7 +492,7 @@ fn vaults_from_the_second_schema_get_locks() {
     vault.check_in(CASE, "v1").unwrap();
     drop(vault);
     let db = rusqlite::Connection::open(dir.path().join(".pdm/vault.db")).unwrap();
-    db.execute_batch("ALTER TABLE documents DROP COLUMN deleted_at; ALTER TABLE documents DROP COLUMN deleted_by; ALTER TABLE documents DROP COLUMN deleted_from; DROP TABLE locks; PRAGMA user_version = 2;").unwrap();
+    db.execute_batch("DROP TABLE release_files; ALTER TABLE documents DROP COLUMN deleted_at; ALTER TABLE documents DROP COLUMN deleted_by; ALTER TABLE documents DROP COLUMN deleted_from; DROP TABLE locks; PRAGMA user_version = 2;").unwrap();
     drop(db);
     let mut vault = Vault::open(dir.path()).unwrap();
     assert_eq!(vault.lock(CASE, "anna").unwrap().user, "anna");
@@ -551,4 +551,30 @@ fn a_new_design_is_checked_in_before_it_is_deleted() {
     assert_eq!(deleted[0].latest.as_ref().unwrap().number, 1);
     assert_eq!(vault.restore_deleted(deleted[0].id).unwrap(), "sketch.solidcraft");
     assert!(matches!(vault.delete("nothing.solidcraft", None), Err(Error::NotTracked(_))));
+}
+
+#[test]
+fn releases_keep_their_production_files() {
+    let (_dir, mut vault) = setup();
+    vault.check_in(CASE, "v1").unwrap();
+    assert!(matches!(vault.add_release_file(CASE, 1, "case-A.step", b"ISO-10303-21;"), Err(Error::NotReleased(_))));
+    let release = vault.release(CASE, "").unwrap();
+    let step = vault.add_release_file(CASE, release.version, "case-A.step", b"ISO-10303-21;").unwrap();
+    vault.add_release_file(CASE, release.version, "case-A.stl", b"solid case").unwrap();
+    assert!(matches!(vault.add_release_file(CASE, release.version, "../case.step", b"x"), Err(Error::InvalidPath(_))));
+    // A file of the same name is replaced.
+    vault.add_release_file(CASE, release.version, "case-A.stl", b"solid case, again").unwrap();
+
+    let files = &vault.lifecycle(CASE).unwrap().releases[0].files;
+    assert_eq!(files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["case-A.step", "case-A.stl"]);
+    assert_eq!(files[1].size, 17);
+    assert_eq!(vault.release_file_bytes(&step).unwrap(), b"ISO-10303-21;");
+    let entry = vault.scan().unwrap().into_iter().find(|e| e.path == CASE).unwrap();
+    assert_eq!(entry.release.unwrap().files.len(), 2, "the scan has them too");
+
+    // Gone with the design when it is purged.
+    vault.delete(CASE, None).unwrap();
+    let id = vault.deleted().unwrap()[0].id;
+    vault.purge_one(id).unwrap();
+    assert!(vault.has_object(&step.hash), "younger than a day: kept for now");
 }

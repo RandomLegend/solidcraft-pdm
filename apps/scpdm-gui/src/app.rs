@@ -65,6 +65,8 @@ struct Settings {
     auto_checkin: bool,
     /// Thumbnails drawn by SolidCraft with outlined edges (else the ones saved in the files).
     draw_thumbnails: bool,
+    /// Production files made when a design is released (extensions, see `export::FORMATS`).
+    release_files: Vec<String>,
     /// When that was last done (Unix seconds), and a version not to point out again.
     last_update_check: i64,
     skipped_update: String,
@@ -84,6 +86,7 @@ impl Default for Settings {
             appearance: Appearance::System,
             auto_checkin: false,
             draw_thumbnails: true,
+            release_files: crate::export::FORMATS.iter().map(|(ext, _)| (*ext).to_owned()).collect(),
             last_update_check: 0,
             skipped_update: String::new(),
         }
@@ -202,7 +205,7 @@ enum Dialog {
     Settings { open_command: String },
     NewFolder { parent: String, name: String },
     NewDesign { folder: String, name: String, part_number: String, description: String, open: bool },
-    Compare { path: String, from: Side, to: Side, result: Option<Result<Comparison, String>> },
+    Compare { path: String, from: Side, to: Side, result: Option<Result<Comparison, String>>, look: CompareLook },
     /// The workspace's login expired.
     Login { password: String, error: Option<String> },
     /// Connect to a server and make a workspace of one of its vaults.
@@ -213,7 +216,8 @@ enum Dialog {
     Delete { path: String, used_in: Vec<String>, remote: bool },
     /// Removing a deleted design for good.
     Purge { id: i64, path: String },
-    Release { path: String, revision: String, note: String },
+    /// `unreleased`: designs the assembly uses that are not released (or changed since), and why.
+    Release { path: String, revision: String, note: String, unreleased: Vec<(String, &'static str)> },
     Properties { path: String, name: String, values: [String; 7], check_in: bool, comment: String },
 }
 
@@ -239,6 +243,28 @@ struct ConnectForm {
     vault: String,
     folder: String,
     error: Option<String>,
+}
+
+/// How a comparison shows the two sides' pictures.
+#[derive(Clone, Copy, PartialEq)]
+struct CompareLook {
+    overlay: bool,
+    /// Overlaid: how much of the "To" side shows over the "From" side.
+    blend: f32,
+    view: crate::render::View,
+}
+
+impl Default for CompareLook {
+    fn default() -> Self {
+        CompareLook { overlay: false, blend: 0.5, view: crate::render::View::Iso }
+    }
+}
+
+/// A side's picture for comparing, and whether a larger one is being drawn.
+#[derive(Clone)]
+struct SidePicture {
+    image: Option<egui::Image<'static>>,
+    drawing: bool,
 }
 
 /// One side of a comparison.
@@ -317,6 +343,15 @@ enum Action {
     Purge(i64),
     InstallUpdate,
     SkipUpdate,
+    /// Makes the production files of a release (again).
+    MakeReleaseFiles { path: String, version: u32, revision: String },
+    SaveReleaseFile(vault::ReleaseFile),
+    SaveReleaseFiles(Vec<vault::ReleaseFile>),
+    SetReleaseFormat { extension: String, on: bool },
+    /// Saves an assembly's bill of materials as a CSV file.
+    SaveBom(String),
+    /// A zip of an assembly with every design it uses, in their vault folders.
+    PackAndGo(String),
 }
 
 pub struct App {
@@ -368,6 +403,11 @@ pub struct App {
     update_check: Option<(Receiver<Result<update::Release, String>>, bool)>,
     update: Option<update::Release>,
     installing: Option<(Receiver<Result<PathBuf, String>>, Arc<update::Progress>)>,
+    /// Production files being made (for this design), and the releases waiting for theirs.
+    exporting: Option<(String, Receiver<crate::export::Finished>)>,
+    export_queue: Vec<crate::export::Request>,
+    /// SolidCraft's command line program, when set (the tests); else looked for.
+    solidcraft_cli: Option<PathBuf>,
 }
 
 impl App {
@@ -415,6 +455,9 @@ impl App {
             update_check: None,
             update: None,
             installing: None,
+            exporting: None,
+            export_queue: Vec::new(),
+            solidcraft_cli: None,
         };
         // Not without stored settings (the tests): they show the thumbnails saved in the files.
         if cc.storage.is_some() && app.settings.draw_thumbnails {
@@ -459,6 +502,37 @@ impl App {
     /// Whether a background scan is running.
     pub fn is_scanning(&self) -> bool {
         self.scan.is_some()
+    }
+
+    /// Draws thumbnails and comparison pictures with SolidCraft, as the app does when it has
+    /// settings storage (the tests have none; the README's screenshots ask for it).
+    pub fn start_drawing(&mut self, ctx: &egui::Context) {
+        self.start_renderer(ctx);
+    }
+
+    /// Whether SolidCraft is drawing pictures.
+    pub fn is_drawing(&self) -> bool {
+        self.renderer.as_ref().is_some_and(|r| r.busy())
+    }
+
+    /// The status line's message, and whether it is an error.
+    pub fn message(&self) -> Option<(&str, bool)> {
+        self.message.as_ref().map(|(text, error)| (text.as_str(), *error))
+    }
+
+    /// Whether production files are being made.
+    pub fn is_exporting(&self) -> bool {
+        self.exporting.is_some() || !self.export_queue.is_empty()
+    }
+
+    /// SolidCraft's command line program to make production files with (instead of looking).
+    pub fn use_solidcraft_cli(&mut self, cli: PathBuf) {
+        self.solidcraft_cli = Some(cli);
+    }
+
+    /// Which production files releasing makes (extensions: step, stl, 3mf).
+    pub fn set_release_formats(&mut self, formats: &[&str]) {
+        self.settings.release_files = formats.iter().map(|f| (*f).to_owned()).collect();
     }
 
     // ---- state ----
@@ -513,6 +587,67 @@ impl App {
             Some(ws) => scan::spawn_remote(ws, known, ctx.clone()),
             None => scan::spawn(backend.root(), known, ctx.clone()),
         });
+    }
+
+    /// Makes the production files of a release on a worker thread (after the one under way).
+    fn make_release_files(&mut self, ctx: &egui::Context, path: &str, version: u32, revision: &str) {
+        let Some(backend) = &self.backend else { return };
+        let history = if self.selected.as_deref() == Some(path) { self.history.clone() } else { backend.history(path).unwrap_or_default() };
+        let Some(v) = history.iter().find(|v| v.number == version) else {
+            self.error(format!("{path} has no v{version}"));
+            return;
+        };
+        let bytes = match backend.version_bytes(v) {
+            Ok(b) => b,
+            Err(e) => {
+                self.error(format!("Production files of {path}: {e}"));
+                return;
+            }
+        };
+        let formats = match self.settings.release_files.clone() {
+            f if f.is_empty() => crate::export::FORMATS.iter().map(|(ext, _)| (*ext).to_owned()).collect(),
+            f => f,
+        };
+        let request = crate::export::Request { path: path.to_owned(), version, revision: revision.to_owned(), bytes, file: backend.absolute(path), formats };
+        self.export_queue.push(request);
+        self.next_export(ctx);
+    }
+
+    fn next_export(&mut self, ctx: &egui::Context) {
+        if self.exporting.is_some() || self.export_queue.is_empty() {
+            return;
+        }
+        let request = self.export_queue.remove(0);
+        let path = request.path.clone();
+        let solidcraft = self.launcher().and_then(|l| l.command.first().map(PathBuf::from));
+        self.exporting = Some((path, crate::export::start(ctx, request, self.solidcraft_cli.clone(), solidcraft)));
+    }
+
+    fn poll_exports(&mut self, ctx: &egui::Context) {
+        let Some((_, rx)) = &self.exporting else { return };
+        let finished = match rx.try_recv() {
+            Ok(f) => f,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.exporting = None;
+                self.error("Making the production files stopped");
+                return;
+            }
+        };
+        self.exporting = None;
+        let crate::export::Finished { path, version, revision, result } = finished;
+        let stored = result.and_then(|files| {
+            let backend = self.backend.as_mut().ok_or("no vault")?;
+            backend.add_release_files(&path, version, &files)?;
+            Ok(files.into_iter().map(|(name, _)| name).collect::<Vec<_>>())
+        });
+        match stored {
+            Ok(names) => self.info_msg(format!("Stored {} with revision {revision} of {path}", names.join(", "))),
+            Err(e) => self.error(format!("Production files of {path}, revision {revision}: {e}")),
+        }
+        self.load_history();
+        self.start_scan(ctx);
+        self.next_export(ctx);
     }
 
     fn check_for_updates(&mut self, ctx: &egui::Context, asked: bool) {
@@ -706,6 +841,60 @@ impl App {
         };
     }
 
+    /// A design's links, as vault paths (one per linked component); `None` when it is missing
+    /// or not readable.
+    fn links_of(&self, path: &str) -> Option<Vec<String>> {
+        let entry = self.entry(path).filter(|e| e.status != Status::Missing)?;
+        let info = self.info(entry)?;
+        Some(info.links.iter().filter_map(|l| resolve_link(path, &l.path)).collect())
+    }
+
+    /// The designs an assembly uses that are not released as they are, and why.
+    fn unreleased_parts(&self, path: &str) -> Vec<(String, &'static str)> {
+        crate::bom::used(path, |p| self.links_of(p))
+            .into_iter()
+            .filter_map(|part| {
+                let why = match self.entry(&part) {
+                    None => "missing",
+                    Some(e) if e.status == Status::Missing => "missing",
+                    Some(e) if e.state == Some(vault::State::Obsolete) => "obsolete",
+                    Some(e) if e.state != Some(vault::State::Released) => "in progress",
+                    Some(e) if e.status == Status::Modified => "changed since its release",
+                    Some(_) => return None,
+                };
+                Some((part, why))
+            })
+            .collect()
+    }
+
+    /// The bill of materials' rows as shown and saved: quantity, part number, name,
+    /// description, revision, state, file.
+    fn bom_rows(&self, path: &str) -> Vec<(crate::bom::Line, [String; 5])> {
+        crate::bom::lines(path, |p| self.links_of(p))
+            .into_iter()
+            .filter(|l| l.path != path)
+            .map(|line| {
+                let entry = self.entry(&line.path);
+                let info = entry.and_then(|e| self.info(e));
+                let stem = line.path.rsplit_once('/').map_or(line.path.as_str(), |(_, n)| n);
+                let stem = stem.rsplit_once('.').map_or(stem, |(s, _)| s);
+                let part_number = info.and_then(|i| i.metadata.part_number.clone()).unwrap_or_default();
+                let name = info.and_then(|i| i.name.clone()).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| stem.to_owned());
+                let description = info.and_then(|i| i.metadata.description.clone()).unwrap_or_default();
+                let revision = info.and_then(|i| i.metadata.revision.clone()).unwrap_or_default();
+                let state = match entry.map(|e| (e.state, e.status)) {
+                    _ if line.missing => "Missing".to_owned(),
+                    Some((Some(vault::State::Released), Status::Current)) => "Released".to_owned(),
+                    Some((Some(vault::State::Released), _)) => "Released · changed".to_owned(),
+                    Some((Some(vault::State::Obsolete), _)) => "Obsolete".to_owned(),
+                    Some((_, Status::Untracked)) => "Not in the vault".to_owned(),
+                    _ => "In progress".to_owned(),
+                };
+                (line, [part_number, name, description, revision, state])
+            })
+            .collect()
+    }
+
     fn entry(&self, path: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.path == path)
     }
@@ -735,21 +924,28 @@ impl App {
     /// SolidCraft's own picture of the content `hash` (with outlined edges), if drawn; asks
     /// for it otherwise (`source`: what to draw).
     fn drawn(&mut self, hash: &str, source: impl FnOnce(&Self) -> Option<crate::render::Source>) -> Option<egui::Image<'static>> {
-        if !self.rendered.contains_key(hash) {
+        self.drawn_shot(hash, crate::render::Shot::Thumbnail, source)
+    }
+
+    fn drawn_shot(&mut self, hash: &str, shot: crate::render::Shot, source: impl FnOnce(&Self) -> Option<crate::render::Source>) -> Option<egui::Image<'static>> {
+        let key = shot.key(hash);
+        if !self.rendered.contains_key(&key) {
             let renderer = self.renderer.as_ref()?;
-            match renderer.cached(hash) {
+            match renderer.cached(hash, shot) {
                 Some(png) => {
-                    self.rendered.insert(hash.to_owned(), Some(png));
+                    self.rendered.insert(key.clone(), Some(png));
                 }
                 None => {
-                    let source = source(self);
-                    self.renderer.as_mut()?.request(hash, || source);
+                    if !renderer.asked(hash, shot) {
+                        let source = source(self);
+                        self.renderer.as_mut()?.request(hash, shot, || source);
+                    }
                     return None;
                 }
             }
         }
-        let png = self.rendered.get(hash)?.clone()?;
-        Some(egui::Image::from_bytes(format!("bytes://drawn-{hash}.png"), egui::load::Bytes::Shared(png)))
+        let png = self.rendered.get(&key)?.clone()?;
+        Some(egui::Image::from_bytes(format!("bytes://drawn-{key}.png"), egui::load::Bytes::Shared(png)))
     }
 
     fn entry_thumb(&mut self, entry: &Entry) -> Option<egui::Image<'static>> {
@@ -1084,7 +1280,11 @@ impl App {
                 } else {
                     (Side::Version(number), Side::Working)
                 };
-                self.dialog = Some(Dialog::Compare { path, from, to, result: None });
+                let look = match &self.dialog {
+                    Some(Dialog::Compare { look, .. }) => *look,
+                    _ => CompareLook::default(),
+                };
+                self.dialog = Some(Dialog::Compare { path, from, to, result: None, look });
             }
             Action::Restore { path, number } => {
                 let Some(backend) = &mut self.backend else { return };
@@ -1205,6 +1405,64 @@ impl App {
                     Err(e) => self.error(e),
                 }
             }
+            Action::SaveBom(path) => {
+                let rows: Vec<Vec<String>> = self
+                    .bom_rows(&path)
+                    .into_iter()
+                    .map(|(line, [part_number, name, description, revision, state])| vec![line.quantity.to_string(), part_number, name, description, revision, state, line.path])
+                    .collect();
+                let text = crate::bom::csv(&["Quantity", "Part number", "Name", "Description", "Revision", "State", "File"], &rows);
+                let stem = path.rsplit_once('/').map_or(path.as_str(), |(_, n)| n);
+                let stem = stem.rsplit_once('.').map_or(stem, |(s, _)| s);
+                let Some(out) = rfd::FileDialog::new().set_file_name(format!("{stem}-bom.csv")).add_filter("CSV", &["csv"]).save_file() else { return };
+                match std::fs::write(&out, text) {
+                    Ok(()) => self.info_msg(format!("Saved the bill of materials as {}", out.display())),
+                    Err(e) => self.error(format!("Saving {}: {e}", out.display())),
+                }
+            }
+            Action::PackAndGo(path) => {
+                let Some(backend) = &self.backend else { return };
+                let stem = path.rsplit_once('/').map_or(path.as_str(), |(_, n)| n);
+                let stem = stem.rsplit_once('.').map_or(stem, |(s, _)| s).to_owned();
+                let Some(out) = rfd::FileDialog::new().set_file_name(format!("{stem}.zip")).add_filter("Zip", &["zip"]).save_file() else { return };
+                let mut designs = vec![path.clone()];
+                designs.extend(crate::bom::used(&path, |p| self.links_of(p)));
+                match crate::bom::pack(&backend.root(), &stem, &designs, &out) {
+                    Ok(missing) if missing.is_empty() => self.info_msg(format!("Packed {} designs into {}", designs.len(), out.display())),
+                    Ok(missing) => self.error(format!("Packed into {}, without {} missing: {}", out.display(), missing.len(), missing.join(", "))),
+                    Err(e) => self.error(format!("Pack and go: {e}")),
+                }
+            }
+            Action::MakeReleaseFiles { path, version, revision } => self.make_release_files(ctx, &path, version, &revision),
+            Action::SaveReleaseFile(file) => {
+                let Some(backend) = &self.backend else { return };
+                let Some(out) = rfd::FileDialog::new().set_file_name(&file.name).save_file() else { return };
+                match backend.release_file_bytes(&file).and_then(|b| std::fs::write(&out, b).map_err(|e| e.to_string())) {
+                    Ok(()) => self.info_msg(format!("Saved {}", out.display())),
+                    Err(e) => self.error(format!("Saving {}: {e}", file.name)),
+                }
+            }
+            Action::SaveReleaseFiles(files) => {
+                let Some(backend) = &self.backend else { return };
+                let Some(dir) = rfd::FileDialog::new().set_title("Folder for the production files").pick_folder() else { return };
+                let saved = files.iter().try_for_each(|f| {
+                    let bytes = backend.release_file_bytes(f)?;
+                    std::fs::write(dir.join(&f.name), bytes).map_err(|e| format!("{}: {e}", f.name))
+                });
+                match saved {
+                    Ok(()) => self.info_msg(format!("Saved {} files in {}", files.len(), dir.display())),
+                    Err(e) => self.error(format!("Saving the production files: {e}")),
+                }
+            }
+            Action::SetReleaseFormat { extension, on } => {
+                self.settings.release_files.retain(|e| *e != extension);
+                if on {
+                    self.settings.release_files.push(extension);
+                }
+                // In the order SolidCraft's formats are listed.
+                let order = |e: &String| crate::export::FORMATS.iter().position(|(f, _)| f == e);
+                self.settings.release_files.sort_by_key(order);
+            }
             Action::SetDrawThumbnails(on) => {
                 self.settings.draw_thumbnails = on;
                 self.rendered.clear();
@@ -1281,7 +1539,8 @@ impl App {
             }
             Action::AskRelease(path) => {
                 let revision = self.lifecycle.as_ref().map(|(_, suggested)| suggested.clone()).unwrap_or_default();
-                self.dialog = Some(Dialog::Release { path, revision, note: String::new() });
+                let unreleased = self.unreleased_parts(&path);
+                self.dialog = Some(Dialog::Release { path, revision, note: String::new(), unreleased });
             }
             Action::Release { path, revision, note } => {
                 let Some(backend) = &mut self.backend else { return };
@@ -1290,6 +1549,9 @@ impl App {
                         self.info_msg(format!("Released {path} as revision {} (v{})", r.revision, r.version));
                         self.load_history();
                         self.start_scan(ctx);
+                        if !self.settings.release_files.is_empty() {
+                            self.make_release_files(ctx, &path, r.version, &r.revision);
+                        }
                     }
                     Err(e) => self.error(e),
                 }
@@ -1564,6 +1826,31 @@ impl App {
     }
 
     /// The picture of a side of a comparison.
+    /// A side's large picture from `view`, drawn by SolidCraft; the thumbnail while it is drawn,
+    /// or when it cannot be.
+    fn side_picture(&mut self, path: &str, side: Side, view: crate::render::View) -> SidePicture {
+        let shot = crate::render::Shot::Large(view);
+        let (hash, version) = match side {
+            Side::Working => (self.entry(path).and_then(|e| e.hash.clone()), None),
+            Side::Version(n) => match self.history.iter().find(|v| v.number == n) {
+                Some(v) => (Some(v.hash.clone()), Some(v.clone())),
+                None => (None, None),
+            },
+        };
+        if let Some(hash) = &hash {
+            let file = self.backend.as_ref().map(|b| b.absolute(path));
+            let large = self.drawn_shot(hash, shot, |app| match &version {
+                Some(v) => app.backend.as_ref()?.version_bytes(v).ok().map(crate::render::Source::Bytes),
+                None => file.map(crate::render::Source::File),
+            });
+            if large.is_some() {
+                return SidePicture { image: large, drawing: false };
+            }
+        }
+        let drawing = hash.as_ref().is_some_and(|h| self.renderer.is_some() && !self.rendered.contains_key(&shot.key(h)));
+        SidePicture { image: self.side_image(path, side), drawing }
+    }
+
     fn side_image(&mut self, path: &str, side: Side) -> Option<egui::Image<'static>> {
         match side {
             Side::Working => {
@@ -2523,6 +2810,13 @@ impl App {
             egui::CollapsingHeader::new(RichText::new("Properties").font(theme::semibold(size::HEADING))).default_open(true).show(ui, |ui| {
                 properties(ui, &entry, info.as_ref(), latest.as_ref());
             });
+            if let Some((lifecycle, _)) = &self.lifecycle {
+                if !lifecycle.releases.is_empty() {
+                    let exporting = self.exporting.as_ref().is_some_and(|(p, _)| *p == entry.path)
+                        || self.export_queue.iter().any(|r| r.path == entry.path);
+                    release_files_ui(ui, &entry.path, &lifecycle.releases, exporting, actions);
+                }
+            }
 
             if let Some(info) = &info {
                 if !info.links.is_empty() {
@@ -2536,6 +2830,7 @@ impl App {
                                 self.link_row(ui, component, &link.path, target, actions);
                             }
                         });
+                    self.bom_ui(ui, &entry.path, actions);
                 }
             }
             let used_in = self.used_in(&entry.path);
@@ -2630,6 +2925,45 @@ impl App {
                 ui.label(RichText::new("This image could not be read.").color(ui.visuals().warn_fg_color));
             }
         });
+    }
+
+    /// An assembly's bill of materials: every design it uses, with the quantity in all.
+    fn bom_ui(&self, ui: &mut egui::Ui, path: &str, actions: &mut Vec<Action>) {
+        let rows = self.bom_rows(path);
+        let pieces: u32 = rows.iter().filter(|(l, _)| !l.assembly).map(|(l, _)| l.quantity).sum();
+        let t = theme::tokens(ui);
+        egui::CollapsingHeader::new(RichText::new("Bill of materials").font(theme::semibold(size::HEADING)))
+            .id_salt("bom")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(RichText::new(format!("{} designs, {pieces} parts in all (through sub-assemblies)", rows.len())).color(t.text_dim));
+                egui::Grid::new("bom-table").num_columns(4).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
+                    for title in ["Qty", "Part number", "Name", "Rev"] {
+                        ui.label(RichText::new(title).small().color(t.label));
+                    }
+                    ui.end_row();
+                    for (line, [part_number, name, _, revision, state]) in &rows {
+                        ui.label(RichText::new(line.quantity.to_string()).strong());
+                        ui.label(part_number);
+                        let shown = if line.assembly { format!("{name} (assembly)") } else { name.clone() };
+                        let text = if line.missing { RichText::new(format!("{name} (missing)")).color(t.error) } else { RichText::new(shown) };
+                        let hint = format!("{}\n{state}{}", line.path, if line.assembly { " · an assembly: its parts are counted too" } else { "" });
+                        if ui.link(text).on_hover_text(hint).clicked() && !line.missing {
+                            actions.push(Action::Select(line.path.clone()));
+                        }
+                        ui.label(revision);
+                        ui.end_row();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Save as CSV…").on_hover_text("For a spreadsheet: quantity, part number, name, description, revision, state, file").clicked() {
+                        actions.push(Action::SaveBom(path.to_owned()));
+                    }
+                    if ui.button("Pack and go…").on_hover_text("A zip of this assembly and every design it uses, in their folders, so the links work where it is unpacked").clicked() {
+                        actions.push(Action::PackAndGo(path.to_owned()));
+                    }
+                });
+            });
     }
 
     fn link_row(&self, ui: &mut egui::Ui, component: &str, shown: &str, target: Option<String>, actions: &mut Vec<Action>) {
@@ -2802,9 +3136,9 @@ impl App {
     fn dialogs(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         // A comparison's pictures are looked up first (that may load them from the store).
         let compare_images = match &self.dialog {
-            Some(Dialog::Compare { path, from, to, .. }) => {
-                let (path, from, to) = (path.clone(), *from, *to);
-                Some((self.side_image(&path, from), self.side_image(&path, to)))
+            Some(Dialog::Compare { path, from, to, look, .. }) => {
+                let (path, from, to, view) = (path.clone(), *from, *to, look.view);
+                Some((self.side_picture(&path, from, view), self.side_picture(&path, to, view)))
             }
             _ => None,
         };
@@ -2917,7 +3251,7 @@ impl App {
                         close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
-                Dialog::Release { path, revision, note } => {
+                Dialog::Release { path, revision, note, unreleased } => {
                     ui.heading("Release");
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -2925,6 +3259,22 @@ impl App {
                         ui.add(egui::TextEdit::singleline(revision).desired_width(80.0));
                     });
                     ui.label(format!("{path} gets this revision: it is written into the design's Revision property and checked in as a new version, which is then the released revision."));
+                    if !unreleased.is_empty() {
+                        ui.add_space(4.0);
+                        egui::Frame::new().fill(t.warning_bg).corner_radius(4.0).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let n = unreleased.len();
+                            let what = if n == 1 { "1 design it uses is".to_owned() } else { format!("{n} designs it uses are") };
+                            ui.label(RichText::new(format!("{what} not released:")).color(t.warning).strong());
+                            for (part, why) in unreleased.iter().take(8) {
+                                ui.label(RichText::new(format!("{part} ({why})")).font(egui::FontId::monospace(size::SMALL + 0.5)));
+                            }
+                            if n > 8 {
+                                ui.label(format!("and {} more", n - 8));
+                            }
+                            ui.label(RichText::new("The release links to their working files as they are now. Release them first to have a fixed state.").small());
+                        });
+                    }
                     ui.add(egui::TextEdit::singleline(note).hint_text("Note (optional), e.g. what this release is for").desired_width(f32::INFINITY));
                     ui.label(
                         RichText::new("If the design is open in SolidCraft, reopen it there afterwards to see the new revision.")
@@ -2934,7 +3284,8 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let ok = !revision.trim().is_empty();
-                        if ui.add_enabled(ok, theme::primary(format!("Release {}", revision.trim()), t)).clicked() {
+                        let label = if unreleased.is_empty() { format!("Release {}", revision.trim()) } else { format!("Release {} anyway", revision.trim()) };
+                        if ui.add_enabled(ok, theme::primary(label, t)).clicked() {
                             actions.push(Action::Release { path: path.clone(), revision: revision.clone(), note: note.clone() });
                             close = true;
                         }
@@ -3147,24 +3498,61 @@ impl App {
                         close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
-                Dialog::Compare { path, from, to, result } => {
-                    ui.set_min_width(680.0);
-                    ui.heading(format!("Compare {}", path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f)));
-                    ui.add_space(4.0);
-                    let (from_image, to_image) = compare_images.clone().unwrap_or((None, None));
-                    let before = (*from, *to);
+                Dialog::Compare { path, from, to, result, look } => {
+                    // Wide, for pictures large enough to see what changed.
+                    let width = (ctx.content_rect().width() * 0.8).clamp(680.0, 1180.0);
+                    ui.set_min_width(width);
+                    ui.set_max_width(width);
                     ui.horizontal(|ui| {
-                        for (label, side, image) in [("From", &mut *from, from_image), ("To", &mut *to, to_image)] {
-                            ui.vertical(|ui| {
-                                thumbnail(ui, image, egui::vec2(208.0, 130.0), egui::Sense::hover());
-                                ui.horizontal(|ui| {
-                                    ui.label(label);
-                                    side_picker(ui, label, side, &self.history);
+                        ui.heading(format!("Compare {}", path.rsplit_once('/').map_or(path.as_str(), |(_, f)| f)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Other views need SolidCraft to draw them.
+                            let drawn = self.renderer.as_ref().is_some_and(|r| r.found() != crate::render::Found::Missing);
+                            ui.add_enabled_ui(drawn, |ui| {
+                                egui::ComboBox::from_id_salt("compare-view").selected_text(look.view.label()).width(110.0).show_ui(ui, |ui| {
+                                    for view in crate::render::View::ALL {
+                                        ui.selectable_value(&mut look.view, view, view.label());
+                                    }
                                 });
-                            });
+                            })
+                            .response
+                            .on_disabled_hover_text("SolidCraft draws the other views: see Settings, Thumbnails");
+                            ui.label("View");
                             ui.add_space(12.0);
-                        }
+                            ui.selectable_value(&mut look.overlay, true, "Overlay");
+                            ui.selectable_value(&mut look.overlay, false, "Side by side");
+                        });
                     });
+                    ui.add_space(4.0);
+                    let (from_picture, to_picture) = compare_images.clone().unwrap_or((SidePicture { image: None, drawing: false }, SidePicture { image: None, drawing: false }));
+                    let before = (*from, *to);
+                    if look.overlay {
+                        let size = egui::vec2(width, (width / THUMB_ASPECT).min(ctx.content_rect().height() * 0.4));
+                        overlay_pictures(ui, &from_picture, &to_picture, look.blend, size);
+                        ui.horizontal(|ui| {
+                            ui.label("From");
+                            side_picker(ui, "From", from, &self.history);
+                            ui.spacing_mut().slider_width = (width - 520.0).max(120.0);
+                            ui.add(egui::Slider::new(&mut look.blend, 0.0..=1.0).show_value(false)).on_hover_text("How much of each side shows");
+                            ui.label("To");
+                            side_picker(ui, "To", to, &self.history);
+                        });
+                    } else {
+                        let each = (width - 12.0) / 2.0;
+                        let size = egui::vec2(each, (each / THUMB_ASPECT).min(ctx.content_rect().height() * 0.4));
+                        ui.horizontal(|ui| {
+                            for (label, side, picture) in [("From", &mut *from, from_picture), ("To", &mut *to, to_picture)] {
+                                ui.vertical(|ui| {
+                                    side_picture_ui(ui, &picture, size);
+                                    ui.horizontal(|ui| {
+                                        ui.label(label);
+                                        side_picker(ui, label, side, &self.history);
+                                    });
+                                });
+                                ui.add_space(12.0);
+                            }
+                        });
+                    }
                     if (*from, *to) != before {
                         *result = None;
                     }
@@ -3174,7 +3562,7 @@ impl App {
                         }));
                     }
                     ui.separator();
-                    egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.5).show(ui, |ui| match result {
+                    egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.28).show(ui, |ui| match result {
                         Some(Ok(c)) => comparison_ui(ui, c),
                         Some(Err(e)) => {
                             ui.colored_label(ui.visuals().error_fg_color, e.as_str());
@@ -3300,6 +3688,22 @@ impl App {
                             .weak(),
                     );
                     ui.add_space(10.0);
+                    ui.label(RichText::new("Production files").font(theme::semibold(size::HEADING)));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("When a design is released, make:");
+                        for (extension, hint) in crate::export::FORMATS {
+                            let mut on = self.settings.release_files.iter().any(|e| e == extension);
+                            if ui.checkbox(&mut on, extension.to_uppercase()).on_hover_text(hint).changed() {
+                                actions.push(Action::SetReleaseFormat { extension: extension.to_owned(), on });
+                            }
+                        }
+                    });
+                    ui.label(
+                        RichText::new("SolidCraft writes them from the released version; they are kept with the release, in the vault or on the server.")
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(10.0);
                     ui.label(RichText::new("Thumbnails").font(theme::semibold(size::HEADING)));
                     let mut draw = self.settings.draw_thumbnails;
                     if ui.checkbox(&mut draw, "Draw them with SolidCraft, with the edges outlined").changed() {
@@ -3380,6 +3784,7 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_scan(ctx);
         self.poll_updates(ctx);
+        self.poll_exports(ctx);
         if let Some(renderer) = self.renderer.as_mut() {
             for (hash, png) in renderer.finished() {
                 self.rendered.insert(hash, png);
@@ -3525,6 +3930,46 @@ fn thumbnail(ui: &mut egui::Ui, image: Option<egui::Image<'static>>, size: egui:
     }
 }
 
+/// A side of a comparison, with a note while SolidCraft draws its large picture.
+fn side_picture_ui(ui: &mut egui::Ui, picture: &SidePicture, size: egui::Vec2) {
+    let response = thumbnail(ui, picture.image.clone(), size, egui::Sense::hover());
+    if picture.drawing {
+        drawing_note(ui, response.rect);
+    }
+}
+
+fn drawing_note(ui: &egui::Ui, rect: egui::Rect) {
+    let t = theme::tokens(ui);
+    let at = rect.left_bottom() + egui::vec2(10.0, -10.0);
+    ui.painter().text(at, egui::Align2::LEFT_BOTTOM, "SolidCraft is drawing it larger…", egui::FontId::proportional(size::SMALL), t.text_dim);
+    ui.ctx().request_repaint_after(Duration::from_millis(250));
+}
+
+/// The "To" side over the "From" side, `blend` of it showing.
+fn overlay_pictures(ui: &mut egui::Ui, from: &SidePicture, to: &SidePicture, blend: f32, size: egui::Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let t = theme::tokens(ui);
+    ui.painter().rect_filled(rect, theme::RADIUS as f32, t.panel_header);
+    // Both pictures are 1.6 : 1; centred in the box.
+    let fit = egui::vec2(rect.width().min(rect.height() * THUMB_ASPECT), rect.height().min(rect.width() / THUMB_ASPECT));
+    let place = egui::Rect::from_center_size(rect.center(), fit);
+    let alpha = |a: f32| Color32::from_white_alpha((a.clamp(0.0, 1.0) * 255.0).round() as u8);
+    if let Some(image) = from.image.clone() {
+        // Opaque pictures cross-fade exactly; a see-through one (a saved thumbnail) still goes.
+        image.tint(alpha(2.0 * (1.0 - blend))).paint_at(ui, place);
+    }
+    if let Some(image) = to.image.clone() {
+        image.tint(alpha(blend)).paint_at(ui, place);
+    }
+    if from.image.is_none() && to.image.is_none() {
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "No saved preview", egui::FontId::proportional(13.0), ui.visuals().weak_text_color());
+    }
+    ui.painter().rect_stroke(rect, theme::RADIUS as f32, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    if from.drawing || to.drawing {
+        drawing_note(ui, rect);
+    }
+}
+
 /// A click area over an already drawn widget. Registered after it, so it is on top: the details
 /// panel's scroll area would otherwise take the clicks of a widget that senses them itself.
 fn clickable(ui: &egui::Ui, drawn: egui::Response, id: &str) -> egui::Response {
@@ -3666,6 +4111,57 @@ fn lifecycle_ui(ui: &mut egui::Ui, entry: &Entry, lifecycle: &vault::Lifecycle, 
         let revision = lifecycle.releases.first().map_or("", |r| r.revision.as_str());
         ui.colored_label(ui.visuals().warn_fg_color, format!("Changed since release {revision}: checking it in starts revision {next}."));
     }
+}
+
+/// A design's production files, by release (newest first), and making them.
+fn release_files_ui(ui: &mut egui::Ui, path: &str, releases: &[vault::Release], exporting: bool, actions: &mut Vec<Action>) {
+    let count: usize = releases.iter().map(|r| r.files.len()).sum();
+    let t = theme::tokens(ui);
+    egui::CollapsingHeader::new(RichText::new(format!("Production files ({count})")).font(theme::semibold(size::HEADING)))
+        .id_salt("release-files")
+        .default_open(true)
+        .show(ui, |ui| {
+            let newest = &releases[0];
+            if exporting {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("SolidCraft is making the files…").color(t.text_dim));
+                });
+            } else if newest.files.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("None for revision {} yet.", newest.revision)).color(t.text_dim));
+                    let button = ui.button("Make them").on_hover_text("STEP, STL and 3MF of the released version, as in the settings");
+                    if button.clicked() {
+                        actions.push(Action::MakeReleaseFiles { path: path.to_owned(), version: newest.version, revision: newest.revision.clone() });
+                    }
+                });
+            }
+            for release in releases.iter().filter(|r| !r.files.is_empty()) {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Revision {}", release.revision)).strong());
+                    ui.label(RichText::new(format!("v{}", release.version)).color(t.text_dim));
+                    if release.files.len() > 1 && ui.small_button("Save all…").on_hover_text("Into a folder you choose").clicked() {
+                        actions.push(Action::SaveReleaseFiles(release.files.clone()));
+                    }
+                });
+                for file in &release.files {
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(&file.name).font(egui::FontId::monospace(size::SMALL + 0.5)));
+                        ui.label(RichText::new(human_size(file.size)).small().color(t.text_dim));
+                        if ui.small_button("Save…").clicked() {
+                            actions.push(Action::SaveReleaseFile(file.clone()));
+                        }
+                    });
+                }
+            }
+            if !exporting && !newest.files.is_empty() {
+                let again = ui.small_button("Make them again").on_hover_text(format!("For revision {}, with the formats in the settings", newest.revision));
+                if again.clicked() {
+                    actions.push(Action::MakeReleaseFiles { path: path.to_owned(), version: newest.version, revision: newest.revision.clone() });
+                }
+            }
+        });
 }
 
 /// The two sides' files, compared.

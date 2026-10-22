@@ -85,6 +85,10 @@ impl Store {
         self.path(hash).is_file()
     }
 
+    pub(crate) fn size(&self, hash: &str) -> Result<u64> {
+        Ok(fs::metadata(self.path(hash))?.len())
+    }
+
     /// Reads an object back, checking its hash.
     pub(crate) fn get(&self, hash: &str) -> Result<Vec<u8>> {
         let bytes = fs::read(self.path(hash)).map_err(|e| match e.kind() {

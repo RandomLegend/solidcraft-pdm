@@ -8,6 +8,7 @@
 //! SolidCraft saves by renaming a new file over the old one, which a read-only file does not
 //! prevent, so the PDM shows a changed released design instead.
 
+use std::collections::HashMap;
 use std::fs;
 
 use rusqlite::{OptionalExtension, params};
@@ -59,6 +60,18 @@ pub struct Release {
     /// Unix seconds.
     pub released_at: i64,
     pub note: String,
+    /// Production files made from it (STEP, STL, 3MF…), see [`Vault::attach_release_file`].
+    pub files: Vec<ReleaseFile>,
+}
+
+/// A file made from a release for production, stored with it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReleaseFile {
+    /// The file name to save it as, e.g. `pi4-case-A.step`.
+    pub name: String,
+    /// Its object (SHA-256).
+    pub hash: String,
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,9 +138,64 @@ impl Vault {
             "SELECT revision, version, released_at, note FROM releases WHERE document_id = ?1 ORDER BY id DESC",
         )?;
         let rows = stmt.query_map([doc], |r| {
-            Ok(Release { revision: r.get(0)?, version: r.get(1)?, released_at: r.get(2)?, note: r.get(3)? })
+            Ok(Release { revision: r.get(0)?, version: r.get(1)?, released_at: r.get(2)?, note: r.get(3)?, files: Vec::new() })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut releases: Vec<Release> = rows.collect::<rusqlite::Result<_>>()?;
+        let mut files = self.release_files_of(Some(doc))?;
+        for release in &mut releases {
+            release.files = files.remove(&(doc, release.version)).unwrap_or_default();
+        }
+        Ok(releases)
+    }
+
+    /// Release files by document and version (`doc`: of one document only).
+    pub(crate) fn release_files_of(&self, doc: Option<i64>) -> Result<HashMap<(i64, u32), Vec<ReleaseFile>>> {
+        let mut stmt = self.db.prepare(
+            "SELECT document_id, version, name, hash, size FROM release_files
+             WHERE ?1 IS NULL OR document_id = ?1 ORDER BY name",
+        )?;
+        let mut out: HashMap<(i64, u32), Vec<ReleaseFile>> = HashMap::new();
+        let rows = stmt.query_map([doc], |r| {
+            Ok(((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?), ReleaseFile { name: r.get(2)?, hash: r.get(3)?, size: r.get::<_, i64>(4)? as u64 }))
+        })?;
+        for row in rows {
+            let (key, file) = row?;
+            out.entry(key).or_default().push(file);
+        }
+        Ok(out)
+    }
+
+    /// Stores a production file with the release that is `version` of `path` (replacing one of
+    /// the same name). The bytes are kept as an object, like versions.
+    pub fn add_release_file(&mut self, path: &str, version: u32, name: &str, bytes: &[u8]) -> Result<ReleaseFile> {
+        let hash = self.put_object(bytes)?;
+        self.attach_release_file(path, version, name, &hash)
+    }
+
+    /// Records the stored object `hash` as a production file of the release that is `version`
+    /// of `path` (a server: uploaded before).
+    pub fn attach_release_file(&mut self, path: &str, version: u32, name: &str, hash: &str) -> Result<ReleaseFile> {
+        let doc = self.document_id(path)?.ok_or_else(|| Error::NotTracked(path.to_owned()))?;
+        if !self.lifecycle(path)?.releases.iter().any(|r| r.version == version) {
+            return Err(Error::NotReleased(format!("{path} v{version}")));
+        }
+        if !is_file_name(name) {
+            return Err(Error::InvalidPath(name.to_owned()));
+        }
+        if !self.has_object(hash) {
+            return Err(Error::Corrupt(format!("no object {hash}")));
+        }
+        let size = self.object_size(hash)?;
+        self.db.execute(
+            "INSERT OR REPLACE INTO release_files (document_id, version, name, hash, size, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![doc, version, name, hash, size as i64, crate::now()],
+        )?;
+        Ok(ReleaseFile { name: name.to_owned(), hash: hash.to_owned(), size })
+    }
+
+    /// A release file's bytes.
+    pub fn release_file_bytes(&self, file: &ReleaseFile) -> Result<Vec<u8>> {
+        self.object(&file.hash)
     }
 
     /// The revision the next release of `path` gets.
@@ -188,7 +256,7 @@ impl Vault {
             Err(Error::Unchanged(_)) => self.latest(doc)?.map_or(0, |v| v.number),
             Err(e) => return Err(e),
         };
-        let release = Release { revision, version, released_at: crate::now(), note: note.to_owned() };
+        let release = Release { revision, version, released_at: crate::now(), note: note.to_owned(), files: Vec::new() };
         let tx = self.db.transaction()?;
         tx.execute(
             "INSERT INTO releases (document_id, version, revision, released_at, note) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -286,6 +354,14 @@ impl Vault {
     pub fn release_of(&self, path: &str, version: &Version) -> Result<Option<Release>> {
         Ok(self.lifecycle(path)?.releases.into_iter().find(|r| r.version == version.number))
     }
+}
+
+/// A plain file name for a release file: no folders, not hidden, not too long.
+fn is_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with('.')
+        && !name.chars().any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control())
 }
 
 #[cfg(test)]

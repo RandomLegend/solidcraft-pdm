@@ -564,6 +564,18 @@ impl Workspace {
         self.refresh_tree()
     }
 
+    /// Uploads production files and stores them with the release that is `version` of `path`.
+    pub fn add_release_files(&mut self, path: &str, version: u32, files: &[(String, Vec<u8>)]) -> Result<protocol::Done> {
+        let mut infos = Vec::new();
+        for (name, bytes) in files {
+            let hash = self.client.upload(&self.state.vault, bytes)?;
+            infos.push(protocol::ReleaseFileInfo { name: name.clone(), hash, size: bytes.len() as u64 });
+        }
+        let done = self.client.act(&self.state.vault, &Action::ReleaseFiles { path: path.to_owned(), version, files: infos })?;
+        self.refresh_tree()?;
+        Ok(done)
+    }
+
     pub fn history(&self, path: &str) -> Result<Vec<VersionInfo>> {
         self.client.history(&self.state.vault, path)
     }

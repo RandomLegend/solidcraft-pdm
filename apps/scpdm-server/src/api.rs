@@ -10,7 +10,7 @@ use axum::http::{StatusCode, header, request::Parts};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use protocol::{
-    Access, Action, ApiError, Design, Done, ErrorCode, Image, Info, LockInfo, Login, ReleaseInfo, Tree, VaultInfo,
+    Access, Action, ApiError, Design, Done, ErrorCode, Image, Info, LockInfo, Login, ReleaseFileInfo, ReleaseInfo, Tree, VaultInfo,
     VersionInfo,
 };
 use serde::Deserialize;
@@ -421,6 +421,16 @@ fn apply(vault: &mut Vault, user: &User, action: Action) -> Reply<Done> {
             vault.delete(&path, Some(&user.name))?;
             Ok(Done::default())
         }
+        Action::ReleaseFiles { path, version, files } => {
+            for file in &files {
+                if !vault.has_object(&file.hash) {
+                    return Err(fail(StatusCode::BAD_REQUEST, ErrorCode::Invalid, format!("upload {} first", file.hash)));
+                }
+                vault.attach_release_file(&path, version, &file.name, &file.hash)?;
+            }
+            let release = vault.lifecycle(&path)?.releases.into_iter().find(|r| r.version == version).map(release_info);
+            Ok(Done { release, ..Done::default() })
+        }
         Action::DeleteImage { path } => {
             if !vault::is_image(std::path::Path::new(&path)) {
                 return Err(fail(StatusCode::BAD_REQUEST, ErrorCode::Invalid, format!("{path} is not an image")));
@@ -449,7 +459,8 @@ pub fn version_info(v: vault::Version) -> VersionInfo {
 }
 
 fn release_info(r: vault::Release) -> ReleaseInfo {
-    ReleaseInfo { revision: r.revision, version: r.version, released_at: r.released_at, note: r.note }
+    let files = r.files.into_iter().map(|f| ReleaseFileInfo { name: f.name, hash: f.hash, size: f.size }).collect();
+    ReleaseInfo { revision: r.revision, version: r.version, released_at: r.released_at, note: r.note, files }
 }
 
 fn state_info(s: vault::State) -> protocol::State {

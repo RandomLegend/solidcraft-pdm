@@ -3,6 +3,26 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
+## Unreleased
+
+### App
+
+- Production files: releasing a design exports it as STEP, STL and 3MF with SolidCraft and
+  keeps them with the release (*Production files* in the details: *Save…*, *Save all…*, *Make
+  them* for older releases). *Settings > Production files* chooses the formats.
+- Assemblies: a *Bill of materials* with quantities through sub-assemblies, *Save as CSV…*, and
+  *Pack and go…* (a zip of the assembly and every design it uses, links intact). Releasing an
+  assembly with unreleased parts names them first.
+- *Compare* shows large pictures of both versions drawn by SolidCraft, side by side or overlaid
+  with a slider, from the isometric, front, top or right view.
+- Vaults use schema 5 (release files): once opened by this version, older versions of the app
+  cannot open them.
+
+### Server
+
+- Keeps a release's production files, uploaded by the app that released it (new action
+  `release-files`; the release's `files` in the API).
+
 ## 0.2.4 — 2026-10-22
 
 ### Windows

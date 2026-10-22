@@ -125,7 +125,13 @@ fn demo_vault(input: &Path, root: &Path) {
             vault.check_in(&path, demo.comment).unwrap();
         }
     }
-    vault.release("Enclosures/pi4-case.solidcraft", "For the workshop").unwrap();
+    let case = vault.release("Enclosures/pi4-case.solidcraft", "For the workshop").unwrap();
+    // Its production files, as SolidCraft exported them (docs/make-screenshots.sh).
+    for ext in ["step", "stl", "3mf"] {
+        if let Ok(bytes) = fs::read(input.join(format!("pi-case-0.8.{ext}"))) {
+            vault.add_release_file("Enclosures/pi4-case.solidcraft", case.version, &format!("pi4-case-{}.{ext}", case.revision), &bytes).unwrap();
+        }
+    }
     vault.release("Hardware/hinge.solidcraft", "").unwrap();
     vault.set_obsolete("Experiments/cube-frame.solidcraft", true).unwrap();
     // Work in progress: changed and not checked in; one design not in the vault yet.
@@ -148,6 +154,15 @@ fn settle(harness: &mut Harness<'_, App>) {
 
 fn shot(harness: &mut Harness<'_, App>, out: &Path, name: &str) {
     harness.remove_cursor();
+    harness.run_steps(4);
+    // SolidCraft's pictures (each about a second).
+    for _ in 0..2000 {
+        harness.step();
+        if !harness.state().is_drawing() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     harness.run_steps(4);
     // Thumbnails are decoded in the background: no spinners in the pictures.
     for _ in 0..300 {
@@ -184,6 +199,11 @@ fn readme_screenshots() {
         .with_pixels_per_point(1.5)
         .with_step_dt(1.0 / 60.0)
         .build_eframe(move |cc| App::new(cc, Some(start)));
+    // Pictures drawn by SolidCraft, as in the app (with SCPDM_SOLIDCRAFT_CLI).
+    if std::env::var_os("SCPDM_SOLIDCRAFT_CLI").is_some() {
+        let ctx = harness.ctx.clone();
+        harness.state_mut().start_drawing(&ctx);
+    }
     settle(&mut harness);
 
     // 1. The vault, with a released design and its history.

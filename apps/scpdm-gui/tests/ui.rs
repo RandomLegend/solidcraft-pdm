@@ -572,14 +572,57 @@ fn compares_a_version_with_the_working_file() {
     harness.get_by_label("~ revision");
     harness.get_by_label("Properties (1)");
     screenshot(&mut harness, "10-compare");
+    // The pictures over each other, with a slider between them.
+    let sliders = |h: &Harness<'_, App>| h.query_all_by_role(egui::accesskit::Role::Slider).count();
+    let before = sliders(&harness);
+    harness.get_by_label("Overlay").click();
+    harness.run_steps(3);
+    assert_eq!(sliders(&harness), before + 1);
+    screenshot(&mut harness, "10-compare-overlay");
+    harness.get_by_label("Side by side").click();
+    harness.run_steps(3);
+    assert_eq!(sliders(&harness), before);
     harness.get_by_label("Close").click();
     harness.run_steps(2);
     assert!(harness.query_by_label("Compare pi4-lid.solidcraft").is_none());
 }
 
+/// A stand-in for SolidCraft's command line program: `run --in D --out F…` writes
+/// "<extension> of <design's size>" to each F.
+fn fake_solidcraft_cli(dir: &Path) -> std::path::PathBuf {
+    let cli = dir.join("solidcraft-cli");
+    fs::write(
+        &cli,
+        r#"#!/bin/sh
+[ "$1" = run ] || exit 2
+shift
+while [ $# -gt 0 ]; do case "$1" in --in) shift; in="$1";; --out) shift; outs="$outs $1";; esac; shift; done
+for o in $outs; do printf '%s of %s bytes' "${o##*.}" "$(wc -c < "$in")" > "$o"; done
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    cli
+}
+
+/// Until the production files are made.
+fn exported(harness: &mut Harness<'_, App>) {
+    for _ in 0..1000 {
+        harness.step();
+        if !harness.state().is_exporting() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    settle(harness);
+}
+
 #[test]
 fn releases_a_design_from_the_details_panel() {
     let (_dir, root, mut harness) = open_demo();
+    let bin = tempfile::tempdir().unwrap();
+    harness.state_mut().use_solidcraft_cli(fake_solidcraft_cli(bin.path()));
     harness.state_mut().select("enclosure/pi4-lid.solidcraft");
     settle(&mut harness);
     // The lid says revision B already (set by hand): that is proposed.
@@ -592,10 +635,65 @@ fn releases_a_design_from_the_details_panel() {
     assert_eq!(scformat::read_file(root.join("enclosure/pi4-lid.solidcraft")).unwrap().metadata.revision.as_deref(), Some("B"));
     harness.get_by_label("Revise");
     harness.get_by_label("Released  (1)");
-    screenshot(&mut harness, "11-released");
     let lifecycle = Vault::open(&root).unwrap().lifecycle("enclosure/pi4-lid.solidcraft").unwrap();
     // The file said B already: nothing to write, the release is v2 itself.
     assert_eq!((lifecycle.state, lifecycle.releases[0].version), (vault::State::Released, 2));
+}
+
+#[cfg(unix)]
+#[test]
+fn releasing_stores_production_files() {
+    let (_dir, root, mut harness) = open_demo();
+    let bin = tempfile::tempdir().unwrap();
+    harness.state_mut().use_solidcraft_cli(fake_solidcraft_cli(bin.path()));
+    harness.state_mut().select("enclosure/pi4-lid.solidcraft");
+    settle(&mut harness);
+    harness.get_by_label("Release as B…").click();
+    harness.run_steps(3);
+    harness.get_by_label("Release B").click();
+    settle(&mut harness);
+    exported(&mut harness);
+
+    harness.get_by_label("Production files (3)");
+    harness.get_by_label("pi4-lid-B.step");
+    harness.get_by_label("pi4-lid-B.3mf");
+    harness.get_by_label("Save all…");
+    screenshot(&mut harness, "11-released");
+    let vault = Vault::open(&root).unwrap();
+    let release = &vault.lifecycle("enclosure/pi4-lid.solidcraft").unwrap().releases[0];
+    let names: Vec<&str> = release.files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["pi4-lid-B.3mf", "pi4-lid-B.step", "pi4-lid-B.stl"]);
+    let released = vault.history("enclosure/pi4-lid.solidcraft").unwrap().into_iter().find(|v| v.number == release.version).unwrap();
+    let step = vault.release_file_bytes(&release.files[1]).unwrap();
+    assert_eq!(String::from_utf8(step).unwrap(), format!("step of {} bytes", released.size), "made from the released version");
+    // No leftovers next to the design.
+    let hidden: Vec<_> = fs::read_dir(root.join("enclosure")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with('.')).collect();
+    assert!(hidden.is_empty());
+}
+
+#[test]
+fn an_assembly_has_a_bill_of_materials_and_warns_about_unreleased_parts() {
+    let (_dir, _root, mut harness) = open_demo();
+    harness.state_mut().select("assembly/pi4-enclosure.solidcraft");
+    settle(&mut harness);
+    // Room for it in the panel.
+    harness.get_by_label("Properties").click();
+    harness.run_steps(4);
+    harness.get_by_label("Bill of materials").click();
+    harness.run_steps(4);
+    harness.get_by_label("2 designs, 2 parts in all (through sub-assemblies)");
+    harness.get_by_label("Qty");
+    // In the table, and in the list's Part number column.
+    assert_eq!(harness.query_all_by_label("PI4-LID-020").count(), 2);
+    harness.get_by_label("Save as CSV…");
+    harness.get_by_label("Pack and go…");
+    screenshot(&mut harness, "13-bill-of-materials");
+
+    harness.get_by_label("Release as A…").click();
+    harness.run_steps(3);
+    harness.get_by_label("2 designs it uses are not released:");
+    harness.get_by_label("enclosure/pi4-case.solidcraft (in progress)");
+    harness.get_by_label("Release A anyway");
 }
 
 #[test]

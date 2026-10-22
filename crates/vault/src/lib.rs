@@ -27,14 +27,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-pub use lifecycle::{Lifecycle, Release, RevisionScheme, State, next_revision};
+pub use lifecycle::{Lifecycle, Release, ReleaseFile, RevisionScheme, State, next_revision};
 pub use shared::{Lock, Stats, is_hash};
 pub use store::hash;
 pub use trash::Deleted;
 use store::{Store, write_atomic};
 
 pub const PDM_DIR: &str = ".pdm";
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -662,19 +662,28 @@ impl Vault {
     /// Every document's state and newest release, by path.
     fn all_lifecycles(&self) -> Result<HashMap<String, (State, Option<Release>)>> {
         let mut stmt = self.db.prepare(
-            "SELECT d.path, d.state, r.revision, r.version, r.released_at, r.note
+            "SELECT d.path, d.state, r.revision, r.version, r.released_at, r.note, d.id
              FROM documents d LEFT JOIN releases r
                ON r.id = (SELECT MAX(id) FROM releases WHERE document_id = d.id)
              WHERE d.deleted_at IS NULL",
         )?;
+        let mut files = self.release_files_of(None)?;
         let rows = stmt.query_map([], |r| {
             let release = match r.get::<_, Option<String>>(2)? {
-                Some(revision) => Some(Release { revision, version: r.get(3)?, released_at: r.get(4)?, note: r.get(5)? }),
+                Some(revision) => Some(Release { revision, version: r.get(3)?, released_at: r.get(4)?, note: r.get(5)?, files: Vec::new() }),
                 None => None,
             };
-            Ok((r.get::<_, String>(0)?, (State::parse(&r.get::<_, String>(1)?), release)))
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(6)?, State::parse(&r.get::<_, String>(1)?), release))
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut out = HashMap::new();
+        for row in rows {
+            let (path, doc, state, mut release) = row?;
+            if let Some(release) = &mut release {
+                release.files = files.remove(&(doc, release.version)).unwrap_or_default();
+            }
+            out.insert(path, (state, release));
+        }
+        Ok(out)
     }
 
     /// Every document's latest version, by the document's current path.
@@ -797,6 +806,23 @@ fn migrate(db: &Connection) -> Result<()> {
              ALTER TABLE documents ADD COLUMN deleted_by TEXT;
              ALTER TABLE documents ADD COLUMN deleted_from TEXT;
              PRAGMA user_version = 4;
+             COMMIT;",
+        )?;
+    }
+    if version < 5 {
+        // Production files (STEP, STL, 3MF…) made from a release, kept as objects.
+        db.execute_batch(
+            "BEGIN;
+             CREATE TABLE release_files (
+                 document_id INTEGER NOT NULL REFERENCES documents(id),
+                 version     INTEGER NOT NULL,
+                 name        TEXT NOT NULL,
+                 hash        TEXT NOT NULL,
+                 size        INTEGER NOT NULL,
+                 created_at  INTEGER NOT NULL,
+                 PRIMARY KEY (document_id, version, name)
+             );
+             PRAGMA user_version = 5;
              COMMIT;",
         )?;
     }

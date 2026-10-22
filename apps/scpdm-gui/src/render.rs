@@ -18,9 +18,70 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-/// The picture's size: the list's and the details panel's thumbnails at 1.6 : 1, sharp at 150 %.
-const WIDTH: u32 = 640;
-const HEIGHT: u32 = 400;
+/// What to draw: a thumbnail (the list's and the details panel's, at 1.6 : 1, sharp at 150 %),
+/// or a large picture from one side, for comparing versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Shot {
+    Thumbnail,
+    Large(View),
+}
+
+/// SolidCraft's standard views.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum View {
+    Iso,
+    Front,
+    Top,
+    Right,
+}
+
+impl View {
+    pub const ALL: [View; 4] = [View::Iso, View::Front, View::Top, View::Right];
+
+    /// As `solidcraft-cli snapshot --view` takes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            View::Iso => "iso",
+            View::Front => "front",
+            View::Top => "top",
+            View::Right => "right",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Iso => "Isometric",
+            View::Front => "Front",
+            View::Top => "Top",
+            View::Right => "Right",
+        }
+    }
+}
+
+impl Shot {
+    fn size(self) -> (u32, u32) {
+        match self {
+            Shot::Thumbnail => (640, 400),
+            Shot::Large(_) => (1280, 800),
+        }
+    }
+
+    fn view(self) -> View {
+        match self {
+            Shot::Thumbnail => View::Iso,
+            Shot::Large(view) => view,
+        }
+    }
+
+    /// The picture's name in the cache (and in [`Renderer::finished`]): a thumbnail's is the
+    /// content hash itself.
+    pub fn key(self, hash: &str) -> String {
+        match self {
+            Shot::Thumbnail => hash.to_owned(),
+            Shot::Large(view) => format!("{hash}-{}-large", view.name()),
+        }
+    }
+}
 /// A drawing that takes longer than this is given up.
 const TIMEOUT: Duration = Duration::from_secs(60);
 const WORKERS: usize = 2;
@@ -42,6 +103,7 @@ pub enum Found {
 
 struct Job {
     hash: String,
+    shot: Shot,
     source: Source,
 }
 
@@ -49,6 +111,8 @@ pub struct Renderer {
     jobs: Sender<Job>,
     done: Receiver<(String, Option<Arc<[u8]>>)>,
     asked: HashSet<String>,
+    /// Pictures asked for and not finished yet.
+    pending: usize,
     cache: PathBuf,
     found: Arc<Mutex<Found>>,
 }
@@ -100,15 +164,16 @@ impl Renderer {
                         }
                         program.clone().flatten()
                     };
-                    let png = cli.and_then(|cli| draw(&cli, &cache, &job.hash, job.source));
-                    if tx.send((job.hash, png)).is_err() {
+                    let key = job.shot.key(&job.hash);
+                    let png = cli.and_then(|cli| draw(&cli, &cache, &job.hash, job.shot, job.source));
+                    if tx.send((key, png)).is_err() {
                         return;
                     }
                     ctx.request_repaint();
                 }
             });
         }
-        Some(Renderer { jobs, done, asked: HashSet::new(), cache, found })
+        Some(Renderer { jobs, done, asked: HashSet::new(), pending: 0, cache, found })
     }
 
     pub fn found(&self) -> Found {
@@ -116,39 +181,55 @@ impl Renderer {
     }
 
     /// A picture drawn before (this or an earlier run).
-    pub fn cached(&self, hash: &str) -> Option<Arc<[u8]>> {
+    pub fn cached(&self, hash: &str, shot: Shot) -> Option<Arc<[u8]>> {
         if !vault::is_hash(hash) {
             return None;
         }
-        std::fs::read(self.cache.join(format!("{hash}.png"))).ok().map(Arc::from)
+        std::fs::read(self.cache.join(format!("{}.png", shot.key(hash)))).ok().map(Arc::from)
     }
 
     /// Asks for a picture of the content `hash` (once); it arrives through [`Renderer::finished`].
     /// `source` is only called when it is not drawn yet.
-    pub fn request(&mut self, hash: &str, source: impl FnOnce() -> Option<Source>) {
-        if !vault::is_hash(hash) || self.asked.contains(hash) || self.found() == Found::Missing {
+    pub fn request(&mut self, hash: &str, shot: Shot, source: impl FnOnce() -> Option<Source>) {
+        let key = shot.key(hash);
+        if !vault::is_hash(hash) || self.asked.contains(&key) || self.found() == Found::Missing {
             return;
         }
-        self.asked.insert(hash.to_owned());
+        self.asked.insert(key);
         if let Some(source) = source() {
-            let _ = self.jobs.send(Job { hash: hash.to_owned(), source });
+            if self.jobs.send(Job { hash: hash.to_owned(), shot, source }).is_ok() {
+                self.pending += 1;
+            }
         }
     }
 
-    /// Pictures finished since the last call (`None`: could not be drawn).
+    /// Whether a picture was asked for and has not arrived yet (or could not be drawn).
+    pub fn asked(&self, hash: &str, shot: Shot) -> bool {
+        self.asked.contains(&shot.key(hash))
+    }
+
+    /// Pictures finished since the last call, by [`Shot::key`] (`None`: could not be drawn).
     pub fn finished(&mut self) -> Vec<(String, Option<Arc<[u8]>>)> {
-        self.done.try_iter().collect()
+        let done: Vec<_> = self.done.try_iter().collect();
+        self.pending = self.pending.saturating_sub(done.len());
+        done
+    }
+
+    /// Whether pictures are being drawn.
+    pub fn busy(&self) -> bool {
+        self.pending > 0
     }
 }
 
 /// Draws the design into the cache; its PNG.
-fn draw(cli: &Path, cache: &Path, hash: &str, source: Source) -> Option<Arc<[u8]>> {
-    let out = cache.join(format!("{hash}.png"));
+fn draw(cli: &Path, cache: &Path, hash: &str, shot: Shot, source: Source) -> Option<Arc<[u8]>> {
+    let key = shot.key(hash);
+    let out = cache.join(format!("{key}.png"));
     if let Ok(png) = std::fs::read(&out) {
         return Some(Arc::from(png));
     }
     // Not drawable with this program: remembered until the program changes.
-    let failed = cache.join(format!("{hash}.failed"));
+    let failed = cache.join(format!("{key}.failed"));
     let program = identity(cli);
     if std::fs::read_to_string(&failed).ok().as_deref() == Some(program.as_str()) {
         return None;
@@ -162,9 +243,10 @@ fn draw(cli: &Path, cache: &Path, hash: &str, source: Source) -> Option<Arc<[u8]
         return None;
     }
     let tmp = cache.join("tmp");
-    let design = tmp.join(format!("{hash}.solidcraft"));
-    let picture = tmp.join(format!("{hash}.png"));
+    let design = tmp.join(format!("{key}.solidcraft"));
+    let picture = tmp.join(format!("{key}.png"));
     std::fs::write(&design, &bytes).ok()?;
+    let (width, height) = shot.size();
     let ok = run(
         Command::new(cli)
             .arg("snapshot")
@@ -172,7 +254,7 @@ fn draw(cli: &Path, cache: &Path, hash: &str, source: Source) -> Option<Arc<[u8]
             .arg(&design)
             .arg("--out")
             .arg(&picture)
-            .args(["--width", &WIDTH.to_string(), "--height", &HEIGHT.to_string(), "--view", "iso", "--no-grid", "--no-axes"]),
+            .args(["--width", &width.to_string(), "--height", &height.to_string(), "--view", shot.view().name(), "--no-grid", "--no-axes"]),
     );
     let _ = std::fs::remove_file(&design);
     let png = ok.then(|| std::fs::read(&picture).ok()).flatten().filter(|p| p.starts_with(b"\x89PNG"));
@@ -309,19 +391,23 @@ mkdir -p squashfs-root/usr/bin && echo extracted >> ../count && printf '#!/bin/s
         std::fs::create_dir_all(cache.join("tmp")).unwrap();
         let good = b"a design".to_vec();
         let hash = vault::hash(&good);
-        assert_eq!(draw(&cli, &cache, &hash, Source::Bytes(good.clone())).as_deref(), Some(PNG));
+        assert_eq!(draw(&cli, &cache, &hash, Shot::Thumbnail, Source::Bytes(good.clone())).as_deref(), Some(PNG));
         assert!(cache.join(format!("{hash}.png")).is_file(), "kept");
         // From the cache, without the program.
-        assert_eq!(draw(Path::new("/nonexistent"), &cache, &hash, Source::Bytes(good)).as_deref(), Some(PNG));
+        assert_eq!(draw(Path::new("/nonexistent"), &cache, &hash, Shot::Thumbnail, Source::Bytes(good.clone())).as_deref(), Some(PNG));
 
         let bad = b"a bad design".to_vec();
         let bad_hash = vault::hash(&bad);
-        assert!(draw(&cli, &cache, &bad_hash, Source::Bytes(bad.clone())).is_none());
+        assert!(draw(&cli, &cache, &bad_hash, Shot::Thumbnail, Source::Bytes(bad.clone())).is_none());
         assert!(cache.join(format!("{bad_hash}.failed")).is_file(), "remembered");
         // A working file that changed in between is not drawn under the old hash.
         let file = dir.path().join("part.solidcraft");
         std::fs::write(&file, b"changed meanwhile").unwrap();
-        assert!(draw(&cli, &cache, &hash.replace('a', "b"), Source::File(file)).is_none());
+        assert!(draw(&cli, &cache, &hash.replace('a', "b"), Shot::Thumbnail, Source::File(file)).is_none());
         assert_eq!(std::fs::read_dir(cache.join("tmp")).unwrap().count(), 0, "no leftovers");
+        // A large picture from the front is another picture.
+        let front = Shot::Large(View::Front);
+        assert_eq!(draw(&cli, &cache, &hash, front, Source::Bytes(good)).as_deref(), Some(PNG));
+        assert!(cache.join(format!("{hash}-front-large.png")).is_file());
     }
 }

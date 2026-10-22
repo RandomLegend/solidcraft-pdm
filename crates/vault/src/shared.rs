@@ -144,6 +144,10 @@ impl Vault {
         is_hash(hash) && self.store.contains(hash)
     }
 
+    pub(crate) fn object_size(&self, hash: &str) -> Result<u64> {
+        self.store.size(hash)
+    }
+
     /// Stores bytes as an object; returns its SHA-256.
     pub fn put_object(&self, bytes: &[u8]) -> Result<String> {
         let hash = store::hash(bytes);

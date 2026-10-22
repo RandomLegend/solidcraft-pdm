@@ -29,8 +29,13 @@ optional [team server](#team-server).
   read-only.
 - **Revisions.** Release a design as A, B, C … (or 01, 02 …): the revision is written into the
   design and the version recorded. Designs are *in progress*, *released* or *obsolete*.
+- **Production files.** Releasing makes STEP, STL and 3MF with SolidCraft and keeps them with
+  the revision, ready to save for the workshop or the printer.
 - **Properties.** Part number, description, project and more, edited right in the file, the
   same ones SolidCraft shows under *Design Properties*.
+- **Assemblies.** A bill of materials with quantities through sub-assemblies (also as CSV),
+  *Pack and go* into a zip that keeps the links, and a warning before releasing an assembly
+  with unreleased parts.
 
 <img src="docs/images/search.png" alt="Fuzzy search through every folder" width="100%">
 
@@ -39,7 +44,8 @@ optional [team server](#team-server).
 
 <img src="docs/images/compare.png" alt="Comparing two versions of a design" width="100%">
 
-- **See what changed** between any two versions: properties, parameters (`height: 24 mm » 32
+- **See what changed** between any two versions: large pictures side by side or overlaid,
+  properties, parameters (`height: 24 mm » 32
   mm`), features (added, removed, renamed, suppressed, which settings), components and links.
 
 <img src="docs/images/folder.png" alt="A folder with designs and a reference image" width="100%">

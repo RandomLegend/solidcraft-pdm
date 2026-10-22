@@ -44,8 +44,11 @@
 - **Right:** the selected design's lifecycle, properties, links (*Uses* / *Used in*), check-in
   and history with each version's thumbnail.
 - **Compare…** on a version in the history shows what changed against the working file (or
-  between any two versions): properties, parameters, features (added, removed, renamed,
-  suppressed, which settings), components, links, and which other parts of the design differ.
+  between any two versions): large pictures of both, side by side or *Overlay* (one over the
+  other, a slider between them), from the isometric, front, top or right view; then properties,
+  parameters, features (added, removed, renamed, suppressed, which settings), components, links,
+  and which other parts of the design differ. The pictures are drawn by SolidCraft (see
+  [Thumbnails](#thumbnails)); without it, the pictures saved in the files are shown.
 - **Double-click** a design, its preview or the working version in the history to open it in
   SolidCraft; an older version opens as a read-only copy (to work on it, restore it first).
 
@@ -76,6 +79,29 @@ checked in yet are checked in first, so what comes back is what you deleted. In 
 a design is deleted for everyone; the server keeps it for a while, and an administrator can
 restore it ([server.md](server.md#deleted-designs)). The confirmation says when other designs
 use the one you delete: their links to it break.
+
+## Production files
+
+Releasing a design also makes its production files: SolidCraft exports the released version as
+STEP (for CAD and CNC), STL and 3MF (for 3D printing), named after the design and revision
+(`pi4-case-B.step`), and the PDM keeps them with the release, in the vault or on the server for
+everyone. The details panel lists them under *Production files* with *Save…* and *Save all…*;
+*Make them* (or *Make them again*) exports a release that has none, made before 0.2.5 say.
+*Settings > Production files* chooses the formats, or none. It uses SolidCraft's command line
+program as the [thumbnails](#thumbnails) do; an assembly is exported with the parts it links to
+as they are in the vault.
+
+## Assemblies
+
+A design that links to others (an assembly) has a **Bill of materials** in its details: every
+design it uses with the quantity in all (two linked hinges with two screws each make four
+screws, plus the assembly's own), part number, name and revision, also through sub-assemblies.
+*Save as CSV…* writes it for a spreadsheet (quantity, part number, name, description, revision,
+state, file). **Pack and go…** writes a zip of the assembly and every design it uses, in their
+vault folders, so the links work wherever it is unpacked.
+
+Releasing an assembly whose parts are not released (or changed since their release) asks first
+and names them: the release would link to working files that can still change.
 
 ## Checking in automatically
 

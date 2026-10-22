@@ -197,9 +197,28 @@ impl Backend {
             Backend::Remote(ws) => {
                 let action = Action::Release { path: path.to_owned(), revision: revision.to_owned(), note: note.to_owned() };
                 let done = lock(ws).act_on_design(path, action).map_err(text)?;
-                let r = done.release.ok_or("the server recorded no release")?;
-                Ok(Release { revision: r.revision, version: r.version, released_at: r.released_at, note: r.note })
+                Ok(release(done.release.ok_or("the server recorded no release")?))
             }
+        }
+    }
+
+    /// Stores production files with the release that is `version` of `path`.
+    pub fn add_release_files(&mut self, path: &str, version: u32, files: &[(String, Vec<u8>)]) -> Result<()> {
+        match self {
+            Backend::Local(v) => {
+                for (name, bytes) in files {
+                    v.add_release_file(path, version, name, bytes).map_err(text)?;
+                }
+                Ok(())
+            }
+            Backend::Remote(ws) => lock(ws).add_release_files(path, version, files).map(drop).map_err(text),
+        }
+    }
+
+    pub fn release_file_bytes(&self, file: &vault::ReleaseFile) -> Result<Vec<u8>> {
+        match self {
+            Backend::Local(v) => v.release_file_bytes(file).map_err(text),
+            Backend::Remote(_) => self.workspace().expect("remote").object(&file.hash).map_err(text),
         }
     }
 
@@ -284,7 +303,8 @@ pub fn state(s: protocol::State) -> vault::State {
 }
 
 pub fn release(r: protocol::ReleaseInfo) -> Release {
-    Release { revision: r.revision, version: r.version, released_at: r.released_at, note: r.note }
+    let files = r.files.into_iter().map(|f| vault::ReleaseFile { name: f.name, hash: f.hash, size: f.size }).collect();
+    Release { revision: r.revision, version: r.version, released_at: r.released_at, note: r.note, files }
 }
 
 /// How a workspace design shows in the window: the vault status the filters use.

@@ -209,6 +209,26 @@ fn releases_and_restores_on_the_server() {
     assert_eq!(t.anna.server_design(LID).unwrap().lock, None, "checked in again");
 }
 
+#[test]
+fn releases_keep_production_files_on_the_server() {
+    let mut t = team();
+    let done = t.anna.act_on_design(LID, Action::Release { path: LID.into(), revision: "A".into(), note: String::new() }).unwrap();
+    let version = done.release.unwrap().version;
+    let files = [("lid-A.step".to_owned(), b"ISO-10303-21;".to_vec()), ("lid-A.stl".to_owned(), b"solid lid".to_vec())];
+    // Reading is not enough.
+    let (_r, mut reader) = workspace(&t.url, "reader", "reader-password");
+    assert_eq!(reader.add_release_files(LID, version, &files).unwrap_err().code(), Some(ErrorCode::Forbidden));
+    assert_eq!(t.anna.add_release_files(LID, version + 1, &files).unwrap_err().code(), Some(ErrorCode::Conflict), "not a release");
+
+    let done = t.anna.add_release_files(LID, version, &files).unwrap();
+    assert_eq!(done.release.unwrap().files.len(), 2);
+    // Everyone sees them, and can fetch them.
+    t.ben.status().unwrap();
+    let release = t.ben.server_design(LID).unwrap().release.clone().unwrap();
+    assert_eq!(release.files.iter().map(|f| (f.name.as_str(), f.size)).collect::<Vec<_>>(), [("lid-A.step", 13), ("lid-A.stl", 9)]);
+    assert_eq!(t.ben.object(&release.files[1].hash).unwrap(), b"solid lid");
+}
+
 fn design_v1() -> String {
     design("LID-1", 1)
 }

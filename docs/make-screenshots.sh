@@ -29,9 +29,13 @@ for name in "${samples[@]}"; do
   cp "$design" "$input/$name.solidcraft"
   "$cli" snapshot "$design" --out "$input/$name.png" --width 480 --height 300 --view iso --no-grid --no-axes >/dev/null
 done
+# The released case's production files.
+"$cli" run --in "$input/pi-case-0.8.solidcraft" --out "$input/pi-case-0.8.step" --out "$input/pi-case-0.8.stl" \
+  --out "$input/pi-case-0.8.3mf" --quiet
 python3 -I "$root/docs/readme-images.py" sketch "$input/reference-sketch.png"
 
-SCPDM_README_INPUT="$input" SCPDM_README_OUT="$root/docs/images" \
-  cargo test --manifest-path "$root/Cargo.toml" -p scpdm-gui --test readme -- --nocapture
+# The app draws its pictures with the same program, into a cache of its own here.
+SCPDM_README_INPUT="$input" SCPDM_README_OUT="$root/docs/images" SCPDM_SOLIDCRAFT_CLI="$cli" \
+  XDG_CACHE_HOME="$root/target/readme/cache" cargo test --manifest-path "$root/Cargo.toml" -p scpdm-gui --test readme -- --nocapture
 python3 -I "$root/docs/readme-images.py" cover "$root/docs/images/vault.png" "$root/docs/images/cover.png"
 ls -la "$root/docs/images"

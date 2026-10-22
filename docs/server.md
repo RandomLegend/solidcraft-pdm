@@ -32,7 +32,9 @@ comes later. It is meant for a trusted team on one network or a VPN.
   the moved file. That needs those designs to be checked in. Other workspaces follow the move
   on their next refresh.
 - **Releases, revisions, obsolete, properties, folders and reference images** are changed on
-  the server, so everyone sees the same state.
+  the server, so everyone sees the same state. A release's production files (STEP, STL, 3MF)
+  are made by the app that releases it and kept on the server with the release; servers before
+  0.2.5 do not take them.
 
 Statuses in the app: *On the server* (not fetched), *Up to date*, *Newer on server*, *Checked
 out*, *Checked out · changed*, *Checked out by anna*, *Changed, not checked out*, *Conflict*,

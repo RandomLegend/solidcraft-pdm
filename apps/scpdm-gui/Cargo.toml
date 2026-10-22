@@ -25,12 +25,12 @@ rfd = { workspace = true }
 nucleo-matcher = { workspace = true }
 sha2 = { workspace = true }
 ureq = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
 scpdm-server = { path = "../scpdm-server" }
 egui_kittest = { workspace = true }
 tempfile = { workspace = true }
-zip = { workspace = true }
 
 [build-dependencies]
 # Used for Windows builds only (also cross-built on Linux), see build.rs.

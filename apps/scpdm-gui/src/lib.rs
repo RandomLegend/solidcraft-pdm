@@ -2,6 +2,8 @@
 
 pub mod app;
 mod backend;
+mod bom;
+mod export;
 pub mod icons;
 mod launcher;
 mod render;
