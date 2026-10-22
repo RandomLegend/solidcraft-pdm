@@ -186,6 +186,8 @@ windows:build:
   needs: []
   tags:
     - saas-windows-medium-amd64
+  # Without a cache, installing Rust and building take about an hour.
+  timeout: 2h
   variables:
     CARGO_HOME: $CI_PROJECT_DIR\.cargo-home
     RUSTUP_HOME: $CI_PROJECT_DIR\.rustup
