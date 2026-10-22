@@ -15,6 +15,15 @@
 #                    and :latest
 # - release          the release, with the changelog section as notes and the files as downloads
 
+# A version commit ("Version 0.2.4") on a branch gets no pipeline: its release tag, pushed right
+# after it, runs the whole pipeline for the same commit (tests included). Without this the commit
+# would be tested twice; skipping it with ci.skip would leave an empty "skipped" pipeline.
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_TITLE =~ /^Version \d+\.\d+\.\d+$/
+      when: never
+    - when: always
+
 stages:
   - test
   - build
