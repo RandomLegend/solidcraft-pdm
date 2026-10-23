@@ -42,6 +42,10 @@ pub enum Icon {
     Filter,
     List,
     Checkpoint,
+    /// Production files.
+    FileStep,
+    FileStl,
+    File3mf,
 }
 
 impl Icon {
@@ -88,6 +92,20 @@ impl Icon {
             Icon::Filter => sc!("model-filter"),
             Icon::List => sc!("model-list"),
             Icon::Checkpoint => sc!("model-checkpoint"),
+            Icon::FileStep => own!("file-step"),
+            Icon::FileStl => own!("file-stl"),
+            Icon::File3mf => own!("file-3mf"),
+        }
+    }
+}
+
+impl Icon {
+    /// A production file's icon, by its name's extension.
+    pub fn for_file(name: &str) -> Icon {
+        match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref() {
+            Some("stl") => Icon::FileStl,
+            Some("3mf") => Icon::File3mf,
+            _ => Icon::FileStep,
         }
     }
 }

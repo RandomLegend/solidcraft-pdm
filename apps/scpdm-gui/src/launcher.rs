@@ -105,6 +105,83 @@ pub(crate) fn detect_in(dirs: &[PathBuf], path_var: Option<&std::ffi::OsStr>) ->
     })
 }
 
+/// A program found installed that opens a kind of file (a slicer for STL, say).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileApp {
+    /// As the program calls itself ("PrusaSlicer").
+    pub name: String,
+    /// Its command line, as [`custom`] takes it (`%f` stands for the file).
+    pub command: String,
+}
+
+impl FileApp {
+    /// A program chosen as a file: named after it.
+    pub fn from_program(path: &Path) -> FileApp {
+        let name = path.file_stem().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        // Quoted, so a path with spaces stays one word.
+        FileApp { name, command: format!("\"{}\" %f", path.display().to_string().replace('"', "\\\"")) }
+    }
+
+    /// Starts the program with `file`.
+    pub fn open(&self, file: &Path) -> std::io::Result<()> {
+        custom(&self.command).ok_or(std::io::ErrorKind::InvalidInput)?.open(file)
+    }
+}
+
+/// The MIME types programs declare for a file extension (production files).
+#[cfg(not(windows))]
+fn mime_types(extension: &str) -> &'static [&'static str] {
+    match extension {
+        "stl" => &["model/stl", "model/x.stl-ascii", "model/x.stl-binary", "application/sla", "application/vnd.ms-pki.stl"],
+        "3mf" => &["model/3mf", "application/vnd.ms-3mfdocument", "application/vnd.ms-package.3dmanufacturing-3dmodel+xml"],
+        "step" | "stp" => &["model/step", "application/step", "model/step+xml", "model/step-xml+zip", "model/step+zip", "application/x-step"],
+        _ => &[],
+    }
+}
+
+/// Installed programs that open files with `extension` (their desktop entries say so), by name.
+#[cfg(not(windows))]
+pub fn apps_for(extension: &str) -> Vec<FileApp> {
+    apps_in(&application_dirs(), std::env::var_os("PATH").as_deref(), extension)
+}
+
+/// Windows keeps its programs per type in the registry; there the system's choice is used, or a
+/// program picked by hand.
+#[cfg(windows)]
+pub fn apps_for(_extension: &str) -> Vec<FileApp> {
+    Vec::new()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn apps_in(dirs: &[PathBuf], path_var: Option<&std::ffi::OsStr>, extension: &str) -> Vec<FileApp> {
+    let wanted = mime_types(extension);
+    let mut found: Vec<FileApp> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for dir in dirs {
+        for file in desktop_files(dir) {
+            // The first folder with an id wins (the user's own over the system's).
+            let id = file.strip_prefix(dir).map_or_else(|_| file.clone(), Path::to_path_buf);
+            if !seen_ids.insert(id) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let Some(entry) = DesktopEntry::parse(&text) else { continue };
+            if entry.hidden || !entry.is_application || !entry.mime_types.iter().any(|m| wanted.contains(&m.as_str())) {
+                continue;
+            }
+            let (Some(name), Some(exec)) = (entry.name, entry.exec) else { continue };
+            if !split_exec(&exec).and_then(|c| c.into_iter().next()).is_some_and(|p| exists(&p, path_var)) {
+                continue;
+            }
+            if !found.iter().any(|a| a.name == name) {
+                found.push(FileApp { name, command: exec });
+            }
+        }
+    }
+    found.sort_by_key(|a| a.name.to_lowercase());
+    found
+}
+
 /// Opens `file` with the system's program for its type (images: the image viewer).
 pub fn open_with_system(file: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
@@ -408,6 +485,35 @@ mod tests {
         assert_eq!(expand(&words(&["app", "%F"]), file), words(&["app", "/v/a b.solidcraft"]));
         assert_eq!(expand(&words(&["app", "--icon", "%i", "%c"]), file), words(&["app", "--icon", "/v/a b.solidcraft"]));
         assert_eq!(expand(&words(&["app", "--file=%f", "100%%"]), file), words(&["app", "--file=/v/a b.solidcraft", "100%"]));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn finds_programs_for_production_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, system) = (dir.path().join("user/applications"), dir.path().join("system/applications"));
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&system).unwrap();
+        let slicer = dir.path().join("Apps/PrusaSlicer.AppImage");
+        std::fs::create_dir_all(slicer.parent().unwrap()).unwrap();
+        std::fs::write(&slicer, "").unwrap();
+        let entry = |name: &str, exec: &str, mime: &str| format!("[Desktop Entry]\nType=Application\nName={name}\nExec={exec}\nMimeType={mime}\n");
+        std::fs::write(user.join("prusa.desktop"), entry("PrusaSlicer", &format!("\"{}\" %F", slicer.display()), "model/stl;application/vnd.ms-3mfdocument;")).unwrap();
+        // The same id in the system folder is the user's entry's, overridden.
+        std::fs::write(system.join("prusa.desktop"), entry("Old PrusaSlicer", &format!("\"{}\" %F", slicer.display()), "model/stl;")).unwrap();
+        std::fs::write(system.join("gone.desktop"), entry("Gone Slicer", "/gone/slicer %f", "model/stl;")).unwrap();
+        std::fs::write(system.join("viewer.desktop"), entry("Image viewer", &format!("\"{}\" %f", slicer.display()), "image/png;")).unwrap();
+
+        let dirs = [user, system];
+        let stl = apps_in(&dirs, None, "stl");
+        assert_eq!(stl.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["PrusaSlicer"]);
+        assert_eq!(custom(&stl[0].command).unwrap().command, words(&[&slicer.to_string_lossy(), "%F"]));
+        assert_eq!(apps_in(&dirs, None, "3mf").len(), 1);
+        assert!(apps_in(&dirs, None, "step").is_empty());
+
+        let chosen = FileApp::from_program(Path::new("/opt/My Slicer/orca-slicer"));
+        assert_eq!(chosen.name, "orca-slicer");
+        assert_eq!(expand(&custom(&chosen.command).unwrap().command, Path::new("/tmp/a b.stl")), words(&["/opt/My Slicer/orca-slicer", "/tmp/a b.stl"]));
     }
 
     #[cfg(not(windows))]

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>3MF file</title>
+  <path d="M14 6L40 6L52 18L52 56Q52 58 50 58L14 58Q12 58 12 56L12 8Q12 6 14 6Z" fill="#e2e8ef" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round"/>
+  <path d="M40 6L40 16Q40 18 42 18L52 18" fill="#b8c3cf" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round"/>
+  <path d="M20 46L44 46L44 51Q44 52 43 52L21 52Q20 52 20 51Z" fill="#236ead" stroke="#236ead" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M22 39L42 39L42 44L22 44Z" fill="#328bd3" stroke="#236ead" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M24 32L40 32L40 37L24 37Z" fill="#b9ddf8" stroke="#236ead" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M27 25L37 25L37 30L27 30Z" fill="#ffffff" stroke="#34465b" stroke-width="1.6" stroke-linejoin="round"/>
+</svg>

@@ -26,17 +26,22 @@
 
 ## The window
 
+**Settings** (the gear at the top right, or *Vault > Settings…*) take the window's place while
+they are open, with their sections on the left: opening designs, production files, versions,
+thumbnails, appearance and updates. Changes apply at once; *Done* or Esc goes back.
+
 - **Top:** *+ New design* creates an empty design (name, folder, optional part number and
   description), checks it in as v1 and opens it in SolidCraft. *View* chooses the list columns
   (also by right-clicking the list header) and the interface size (also Ctrl + / Ctrl - /
-  Ctrl 0; more presets in Vault > Settings). The interface starts at 150 %.
+  Ctrl 0; more presets in *Settings > Appearance*). The interface starts at 150 %.
 - **Left:** status and lifecycle filters, and the folder tree (also empty folders).
   *+ New folder* creates one in the selected folder; right-click a folder for a subfolder,
   *Show in file manager* or *Delete* (empty folders only). Drag designs onto a folder, or use
   *Move to* in a design's right-click menu, to move them with their history.
 - **Middle:** designs, and in folder views also the folder's reference images (PNG, JPEG,
   WebP): shown with a thumbnail, opened in your image viewer on double-click, moved like
-  designs, but not versioned. Right-click a row, or below the list, for *New design here…*.
+  designs, but not versioned. Designs are listed without their `.solidcraft` ending (the details
+  show the whole file name). Right-click a row, or below the list, for *New design here…*.
   The search bar (Ctrl+F, Esc clears) searches the whole vault, whatever folder is selected:
   fuzzy and ranked, each word matched within the file name, design name, part number,
   description, project or folder, with the matched letters highlighted. The slider sets the
@@ -61,14 +66,14 @@ Double-click opens a design in SolidCraft as installed: the app finds SolidCraft
 (the one the AppImage installs on its first run, or one from Gear Lever, AppImageLauncher,
 appimaged, Flatpak or a package) and runs its `Exec` line, else `solidcraft` on `PATH`. It does
 not use `xdg-open`: the AppImage registers no MIME type for `*.solidcraft`, so `xdg-open`
-guesses from the contents (ZIP or JSON) and may pick an unrelated program. Vault > Settings shows
+guesses from the contents (ZIP or JSON) and may pick an unrelated program. *Settings > Opening designs* shows
 what was found and takes another program or AppImage. On Windows see [windows.md](windows.md).
 
 ## New designs
 
 New designs are written as plain JSON in format 1, which every SolidCraft release opens and
-upgrades (checked with SolidCraft 0.18.3: it saves such a file as a `solidcraft/29` container
-and keeps its properties).
+upgrades (checked with SolidCraft 0.18.3 and 0.20.0: they save such a file as a container in
+their format, `solidcraft/29` or `solidcraft/31`, and keep its properties).
 
 ## Deleting designs
 
@@ -85,8 +90,12 @@ use the one you delete: their links to it break.
 Releasing a design also makes its production files: SolidCraft exports the released version as
 STEP (for CAD and CNC), STL and 3MF (for 3D printing), named after the design and revision
 (`pi4-case-B.step`), and the PDM keeps them with the release, in the vault or on the server for
-everyone. The details panel lists them under *Production files* with *Save…* and *Save all…*;
-*Make them* (or *Make them again*) exports a release that has none, made before 0.2.5 say.
+everyone. The details panel lists them under *Production files*, each with its icon, *Open*
+and *Save…* (*Save all…* for a release's files); *Make them* (or *Make them again*) exports a
+release that has none, made before 0.2.5 say. *Open* starts the system's program for the type,
+or the one chosen in *Settings > Production files > Open with*: a slicer for STL and 3MF
+(PrusaSlicer, OrcaSlicer, Cura…), a CAD program for STEP. Installed programs that open the
+type are offered there, any other one can be picked.
 *Settings > Production files* chooses the formats, or none. It uses SolidCraft's command line
 program as the [thumbnails](#thumbnails) do; an assembly is exported with the parts it links to
 as they are in the vault.
@@ -105,7 +114,7 @@ and names them: the release would link to working files that can still change.
 
 ## Checking in automatically
 
-For one person, checking in by hand is often one step too many. *Vault > Settings > Versions >
+For one person, checking in by hand is often one step too many. *Settings > Versions >
 Check in automatically*: a design you saved in SolidCraft becomes the next version a few
 seconds later (the comment says it was checked in automatically), new designs in the vault
 too, also while the PDM is in the background. In a server vault this happens where check-out
@@ -135,7 +144,7 @@ its notes:
   installer runs and starts the app again.
 - *Release page*, *Skip this version* (not pointed out again), *Later*.
 
-*Vault > Settings > Updates* switches the daily look off, or checks now. A build from source
+*Settings > Updates* switches the daily look off, or checks now. A build from source
 does not look by itself; *Check now* still tells you about new releases.
 
 ## Working with a team

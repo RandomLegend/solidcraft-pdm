@@ -178,7 +178,7 @@ fn connects_to_a_server_and_opens_a_vault() {
     h.get_by_label("Open the vault").click();
     settle(&mut h);
     assert!(Workspace::is_workspace(Path::new(&target)));
-    h.get_by_label("pi4-case.solidcraft");
+    h.get_by_label("pi4-case");
     h.get_by_label("On the server");
 }
 
@@ -231,7 +231,7 @@ fn deleting_on_a_server_vault_goes_to_the_server() {
     h.get_by_label("Get").click();
     settle(&mut h);
     // The list's row (the details panel shows the name too, on the right).
-    let row = h.query_all_by_label("pi4-case.solidcraft").map(|n| n.rect()).min_by(|a, b| a.left().total_cmp(&b.left())).unwrap();
+    let row = h.query_all_by_label("pi4-case").map(|n| n.rect()).min_by(|a, b| a.left().total_cmp(&b.left())).unwrap();
     h.hover_at(row.center());
     h.step();
     for pressed in [true, false] {
@@ -245,6 +245,6 @@ fn deleting_on_a_server_vault_goes_to_the_server() {
     h.get_by_label("Delete").click();
     settle(&mut h);
     assert!(!s.anna_root.join(CASE).exists());
-    assert!(h.query_by_label("pi4-case.solidcraft").is_none());
+    assert!(h.query_by_label("pi4-case").is_none());
     h.get_by_label_contains("an administrator can restore it");
 }

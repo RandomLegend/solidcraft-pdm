@@ -1,8 +1,7 @@
 # CI (on the project's own runner, a Linux machine with Docker):
 # - linux:test       the tests, on every push
-# - linux:appimage   SolidCraft-PDM-<version>-x86_64.AppImage, automatically on the default
-#                    branch when the push changes the app (see its rules), otherwise and on
-#                    other branches by hand (kept 30 days)
+# - linux:appimage   SolidCraft-PDM-<version>-x86_64.AppImage, by hand (kept 30 days); every
+#                    release builds its own
 # - windows:build    solidcraft-pdm.exe and scpdm.exe, built on Linux for Windows (MinGW), then
 #   windows:installer  SolidCraft-PDM-<version>-setup.exe (Inno Setup in Wine): by hand on
 #                    branches (kept 30 days)
@@ -20,8 +19,10 @@
 #                    GITHUB_TOKEN and GITHUB_REPO set, see the job)
 
 # A version commit ("Version 0.2.4") on a branch gets no pipeline: its release tag, pushed right
-# after it, runs the whole pipeline for the same commit (tests included). Without this the commit
-# would be tested twice; skipping it with ci.skip would leave an empty "skipped" pipeline.
+# after it, runs the whole pipeline for the same commit. Without this the commit would be tested
+# twice; skipping it with ci.skip would leave an empty "skipped" pipeline. The tag's tests are
+# skipped in turn when the commit before passed on the default branch and the version commit
+# changes nothing but the version, the changelog and docs (see linux:test).
 workflow:
   rules:
     - if: $CI_COMMIT_BRANCH && $CI_COMMIT_TITLE =~ /^Version \d+\.\d+\.\d+$/
@@ -49,6 +50,17 @@ linux:test:
       - .cargo-home/registry/
       - target/
   script:
+    - |
+      if [ -n "${CI_COMMIT_TAG:-}" ] && before="$(git rev-parse -q --verify HEAD~1)"; then
+        # Only the version (Cargo.toml, Cargo.lock), CHANGELOG.md and docs/ changed?
+        others="$(git diff --name-only HEAD~1 HEAD | grep -vE '^(Cargo\.toml|Cargo\.lock|CHANGELOG\.md|docs/)' || true)"
+        manifest="$(git diff -U0 HEAD~1 HEAD -- Cargo.toml Cargo.lock | grep -E '^[+-][^+-]' | grep -vE '^[+-]version = ' || true)"
+        passed="$(curl -sf "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines?sha=$before&ref=$CI_DEFAULT_BRANCH&status=success" || true)"
+        if [ -z "$others" ] && [ -z "$manifest" ] && printf '%s' "$passed" | grep -q '"id"'; then
+          echo "Tested already: $before passed on $CI_DEFAULT_BRANCH, and $CI_COMMIT_TAG only changes the version, changelog or docs."
+          exit 0
+        fi
+      fi
     - rustc --version
     - cargo test --workspace --locked
 
@@ -72,19 +84,8 @@ linux:appimage:
   rules:
     - if: $CI_COMMIT_TAG
       when: never
-    # Built by itself only when the push changes what goes into the AppImage: the app, the
-    # command line, the crates they use, packaging, dependencies. Otherwise (the server, docs):
-    # by hand.
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      changes:
-        - apps/scpdm-gui/**/*
-        - apps/scpdm/**/*
-        - crates/**/*
-        - assets/**/*
-        - packaging/linux/**/*
-        - Cargo.toml
-        - Cargo.lock
-        - .gitlab-ci.yml
+    # By hand: a release builds its own (release:appimage), so building it on every push would
+    # build the same app twice.
     - when: manual
       allow_failure: true
   artifacts:

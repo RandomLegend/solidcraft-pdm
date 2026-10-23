@@ -56,6 +56,8 @@ fn points_out_a_newer_release() {
     h.run_steps(2);
     h.get_by_label("Settings…").click();
     h.run_steps(3);
+    h.get_by_label("Updates").click();
+    h.run_steps(3);
     h.get_by_label("Check now").click();
     wait_for(&mut h, "SolidCraft PDM 9.0.0");
     h.run_steps(2);

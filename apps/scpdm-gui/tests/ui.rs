@@ -156,8 +156,8 @@ fn browses_a_vault() {
         .build_eframe(|cc| App::new(cc, Some(root.clone())));
     settle(&mut harness);
 
-    harness.get_by_label("pi4-case.solidcraft");
-    harness.get_by_label("m3-screw.solidcraft");
+    harness.get_by_label("pi4-case");
+    harness.get_by_label("m3-screw");
     harness.get_by_label("All designs  (5)");
     harness.get_by_label("Modified  (1)");
     harness.get_by_label("Untracked  (1)");
@@ -228,22 +228,22 @@ fn search_finds_designs_in_every_folder() {
     // A folder is selected, but a search looks through the whole vault.
     harness.get_by_label("assembly  (1)").click();
     harness.run_steps(2);
-    assert!(harness.query_by_label("pi4-case.solidcraft").is_none());
+    assert!(harness.query_by_label("pi4-case").is_none());
 
     harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
     harness.run_steps(2);
     type_text(&mut harness, "vented"); // only in the case's description
     harness.get_by_label("1 match in the whole vault");
-    harness.get_by_label("pi4-case.solidcraft");
+    harness.get_by_label("pi4-case");
 
     harness.key_press(egui::Key::Escape); // clears the search and leaves the field
     harness.run_steps(2);
-    harness.get_by_label("pi4-enclosure.solidcraft"); // the selected folder again
+    harness.get_by_label("pi4-enclosure"); // the selected folder again
     harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
     harness.run_steps(2);
     type_text(&mut harness, "p4lid"); // fuzzy: letters in order
-    harness.get_by_label("pi4-lid.solidcraft");
-    assert!(harness.query_by_label("pi4-case.solidcraft").is_none());
+    harness.get_by_label("pi4-lid");
+    assert!(harness.query_by_label("pi4-case").is_none());
     screenshot(&mut harness, "5-search");
 }
 
@@ -262,7 +262,7 @@ fn creates_folders() {
 #[test]
 fn dragging_a_design_onto_a_folder_moves_it() {
     let (_dir, root, mut harness) = open_demo();
-    let from = harness.get_by_label("m3-screw.solidcraft").rect().center();
+    let from = harness.get_by_label("m3-screw").rect().center();
     let to = harness.get_by_label("enclosure  (2)").rect().center();
     harness.hover_at(from);
     harness.drag_at(from);
@@ -331,7 +331,7 @@ fn double_clicking_a_row_opens_the_design() {
     harness.state_mut().set_open_command(&opener.to_string_lossy());
     let file = root.join("enclosure/pi4-case.solidcraft").display().to_string();
 
-    let name = harness.get_by_label("pi4-case.solidcraft").rect();
+    let name = harness.get_by_label("pi4-case").rect();
     double_click_at(&mut harness, name.center());
     harness.run_steps(60); // a second apart, or egui counts a triple click
     double_click_at(&mut harness, egui::pos2(name.left() - 60.0, name.center().y)); // the thumbnail
@@ -455,7 +455,7 @@ fn moving_into_a_new_folder_adds_no_version() {
     settle(&mut harness);
     harness.get_by_label("All designs  (5)").click();
     settle(&mut harness);
-    let from = harness.get_by_label("pi4-lid.solidcraft").rect().center();
+    let from = harness.get_by_label("pi4-lid").rect().center();
     let to = harness.get_by_label("archive  (0)").rect().center();
     harness.hover_at(from);
     harness.drag_at(from);
@@ -493,7 +493,7 @@ fn shows_reference_images_in_folders() {
     settle(&mut harness);
     harness.get_by_label("case-ref.jpg");
     harness.get_by_label("lid-sketch.webp");
-    harness.get_by_label("pi4-case.solidcraft");
+    harness.get_by_label("pi4-case");
     harness.get_by_label_contains("Reference image  ·  400 × 200");
     screenshot(&mut harness, "8-images");
 
@@ -520,7 +520,7 @@ fn new_design_from_a_right_click_in_the_list() {
     harness.get_by_label("assembly  (1)").click();
     settle(&mut harness);
     // Below the only row.
-    let row = harness.get_by_label("pi4-enclosure.solidcraft").rect();
+    let row = harness.get_by_label("pi4-enclosure").rect();
     let below = egui::pos2(row.center().x, row.bottom() + 200.0);
     harness.hover_at(below);
     harness.step();
@@ -538,7 +538,7 @@ fn new_design_from_a_right_click_in_the_list() {
 #[test]
 fn moving_a_linked_part_updates_the_assembly() {
     let (_dir, root, mut harness) = open_demo();
-    let from = harness.get_by_label("pi4-lid.solidcraft").rect().center();
+    let from = harness.get_by_label("pi4-lid").rect().center();
     let to = harness.get_by_label("parts  (2)").rect().center();
     harness.hover_at(from);
     harness.drag_at(from);
@@ -658,7 +658,11 @@ fn releasing_stores_production_files() {
     harness.get_by_label("pi4-lid-B.step");
     harness.get_by_label("pi4-lid-B.3mf");
     harness.get_by_label("Save all…");
+    assert_eq!(harness.query_all_by_label("Open").count(), 3, "each opens in the system's program");
+    harness.get_by_label("Properties").click_accesskit();
+    harness.run_steps(4);
     screenshot(&mut harness, "11-released");
+
     let vault = Vault::open(&root).unwrap();
     let release = &vault.lifecycle("enclosure/pi4-lid.solidcraft").unwrap().releases[0];
     let names: Vec<&str> = release.files.iter().map(|f| f.name.as_str()).collect();
@@ -669,6 +673,27 @@ fn releasing_stores_production_files() {
     // No leftovers next to the design.
     let hidden: Vec<_> = fs::read_dir(root.join("enclosure")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with('.')).collect();
     assert!(hidden.is_empty());
+
+    // In a slicer of one's choice: a copy, under the file's name.
+    let opened = bin.path().join("opened.txt");
+    let slicer = bin.path().join("slicer");
+    fs::write(&slicer, format!("#!/bin/sh\nprintf '%s' \"$1\" > '{}'\n", opened.display())).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&slicer, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    harness.state_mut().set_file_app("stl", "My Slicer", &format!("\"{}\" %f", slicer.display()));
+    harness.run_steps(3);
+    // Below the fold of the details panel: through accessibility.
+    harness.get_by_label("Open in My Slicer").click_accesskit();
+    harness.run_steps(3);
+    for _ in 0..200 {
+        if opened.is_file() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let path = fs::read_to_string(&opened).unwrap();
+    assert!(path.ends_with("/pi4-lid-B.stl"), "{path}");
+    assert_eq!(fs::read(&path).unwrap(), vault.release_file_bytes(&release.files[2]).unwrap());
 }
 
 #[test]
@@ -694,6 +719,28 @@ fn an_assembly_has_a_bill_of_materials_and_warns_about_unreleased_parts() {
     harness.get_by_label("2 designs it uses are not released:");
     harness.get_by_label("enclosure/pi4-case.solidcraft (in progress)");
     harness.get_by_label("Release A anyway");
+}
+
+#[test]
+fn settings_are_a_page_with_sections() {
+    let (_dir, _root, mut harness) = open_demo();
+    harness.get_by_label("Settings").click();
+    harness.run_steps(3);
+    assert_eq!(harness.query_all_by_label("Opening designs").count(), 2, "the section and its title");
+    harness.get_by_label("Use this program instead (optional):");
+    assert!(harness.query_by_label("All designs  (5)").is_none(), "in place of the vault");
+    harness.get_by_label("Production files").click();
+    harness.run_steps(3);
+    harness.get_by_label("STL: for 3D printing");
+    harness.get_by_label("STL files");
+    harness.get_by_label("Open with");
+    screenshot(&mut harness, "14-settings");
+    harness.get_by_label("Appearance").click();
+    harness.run_steps(3);
+    harness.get_by_label("Interface size");
+    harness.key_press(egui::Key::Escape);
+    harness.run_steps(3);
+    harness.get_by_label("All designs  (5)");
 }
 
 #[test]
@@ -795,7 +842,7 @@ fn a_new_empty_folder_takes_new_designs_and_folders() {
 #[test]
 fn deleted_designs_wait_in_recently_deleted() {
     let (_dir, root, mut harness) = open_demo();
-    let row = harness.get_by_label("m2.5-standoff.solidcraft").rect();
+    let row = harness.get_by_label("m2.5-standoff").rect();
     right_click_at(&mut harness, row.center());
     harness.get_by_label("Delete…").click();
     harness.run_steps(3);
@@ -803,7 +850,7 @@ fn deleted_designs_wait_in_recently_deleted() {
     harness.get_by_label("Delete").click();
     settle(&mut harness);
     assert!(!root.join("parts/fasteners/m2.5-standoff.solidcraft").exists());
-    assert!(harness.query_by_label("m2.5-standoff.solidcraft").is_none());
+    assert!(harness.query_by_label("m2.5-standoff").is_none());
 
     harness.get_by_label("Recently deleted  (1)").click();
     harness.run_steps(3);
@@ -816,7 +863,7 @@ fn deleted_designs_wait_in_recently_deleted() {
     // Deleted for good: nothing to restore.
     harness.get_by_label("All designs  (5)").click();
     settle(&mut harness);
-    let row = harness.get_by_label("m2.5-standoff.solidcraft").rect();
+    let row = harness.get_by_label("m2.5-standoff").rect();
     right_click_at(&mut harness, row.center());
     harness.get_by_label("Delete…").click();
     harness.run_steps(3);

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>STEP file</title>
+  <path d="M14 6L40 6L52 18L52 56Q52 58 50 58L14 58Q12 58 12 56L12 8Q12 6 14 6Z" fill="#e2e8ef" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round"/>
+  <path d="M40 6L40 16Q40 18 42 18L52 18" fill="#b8c3cf" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round"/>
+  <path d="M32 26L44 32.5L32 39L20 32.5Z" fill="#b9ddf8" stroke="#236ead" stroke-width="2.2" stroke-linejoin="round"/>
+  <path d="M20 32.5L32 39L32 51L20 44.5Z" fill="#328bd3" stroke="#236ead" stroke-width="2.2" stroke-linejoin="round"/>
+  <path d="M44 32.5L32 39L32 51L44 44.5Z" fill="#236ead" stroke="#236ead" stroke-width="2.2" stroke-linejoin="round"/>
+</svg>

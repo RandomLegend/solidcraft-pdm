@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>STL file</title>
+  <path d="M14 6L40 6L52 18L52 56Q52 58 50 58L14 58Q12 58 12 56L12 8Q12 6 14 6Z" fill="#e2e8ef" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round"/>
+  <path d="M40 6L40 16Q40 18 42 18L52 18" fill="#b8c3cf" stroke="#34465b" stroke-width="2.55" stroke-linejoin="round"/>
+  <path d="M19 50L26 30L38 26L45 46Z" fill="#8e9faf" stroke="#34465b" stroke-width="2.2" stroke-linejoin="round"/>
+  <path d="M26 30L45 46M26 30L32 48M38 26L32 48M19 50L32 48L45 46" fill="none" stroke="#34465b" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M26 30L38 26L32 48Z" fill="#6f879c" stroke="#34465b" stroke-width="2" stroke-linejoin="round"/>
+</svg>

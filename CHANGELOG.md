@@ -3,6 +3,23 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
+## Unreleased
+
+### App
+
+- Settings are a page of their own, with sections (opening designs, production files, versions,
+  thumbnails, appearance, updates), instead of one long dialog.
+- Production files have icons, and *Open* or *Open in …*: the program for each type is chosen in
+  *Settings > Production files* (installed slicers and CAD programs are offered).
+- The list shows designs without their `.solidcraft` ending.
+- Checked with SolidCraft 0.20 (formats 30 and 31): nothing changes for the PDM.
+
+### CI
+
+- A release's tests are skipped when the commit before its version commit passed already and the
+  version commit changes only the version, changelog and docs; the AppImage is built by hand on
+  branches (every release builds its own).
+
 ## 0.2.5 — 2026-10-22
 
 ### App

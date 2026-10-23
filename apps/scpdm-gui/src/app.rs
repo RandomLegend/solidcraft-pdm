@@ -20,6 +20,9 @@ use crate::search::{Haystack, Search};
 use crate::icons::{self, Icon};
 use crate::theme::{self, size};
 use crate::update;
+
+mod settings_page;
+use settings_page::Section;
 use scformat::compare::{Change, Comparison, FeatureChangeKind};
 
 /// How often the vault is rescanned while the window has focus (cheap: unchanged files are
@@ -67,6 +70,8 @@ struct Settings {
     draw_thumbnails: bool,
     /// Production files made when a design is released (extensions, see `export::FORMATS`).
     release_files: Vec<String>,
+    /// The program each kind of production file opens in, by extension (none: the system's).
+    file_apps: BTreeMap<String, launcher::FileApp>,
     /// When that was last done (Unix seconds), and a version not to point out again.
     last_update_check: i64,
     skipped_update: String,
@@ -87,6 +92,7 @@ impl Default for Settings {
             auto_checkin: false,
             draw_thumbnails: true,
             release_files: crate::export::FORMATS.iter().map(|(ext, _)| (*ext).to_owned()).collect(),
+            file_apps: BTreeMap::new(),
             last_update_check: 0,
             skipped_update: String::new(),
         }
@@ -202,7 +208,6 @@ enum Dialog {
     Rename { from: String, to: String },
     CheckInAll { comment: String, untracked: bool },
     MakeVault { dir: PathBuf },
-    Settings { open_command: String },
     NewFolder { parent: String, name: String },
     NewDesign { folder: String, name: String, part_number: String, description: String, open: bool },
     Compare { path: String, from: Side, to: Side, result: Option<Result<Comparison, String>>, look: CompareLook },
@@ -348,6 +353,9 @@ enum Action {
     SaveReleaseFile(vault::ReleaseFile),
     SaveReleaseFiles(Vec<vault::ReleaseFile>),
     SetReleaseFormat { extension: String, on: bool },
+    SetFileApp { extension: String, app: Option<launcher::FileApp> },
+    /// Opens a production file in its program (Settings > Production files).
+    OpenReleaseFile(vault::ReleaseFile),
     /// Saves an assembly's bill of materials as a CSV file.
     SaveBom(String),
     /// A zip of an assembly with every design it uses, in their vault folders.
@@ -408,6 +416,8 @@ pub struct App {
     export_queue: Vec<crate::export::Request>,
     /// SolidCraft's command line program, when set (the tests); else looked for.
     solidcraft_cli: Option<PathBuf>,
+    /// The settings, while they are shown.
+    settings_page: Option<settings_page::SettingsPage>,
 }
 
 impl App {
@@ -458,6 +468,7 @@ impl App {
             exporting: None,
             export_queue: Vec::new(),
             solidcraft_cli: None,
+            settings_page: None,
         };
         // Not without stored settings (the tests): they show the thumbnails saved in the files.
         if cc.storage.is_some() && app.settings.draw_thumbnails {
@@ -528,6 +539,11 @@ impl App {
     /// SolidCraft's command line program to make production files with (instead of looking).
     pub fn use_solidcraft_cli(&mut self, cli: PathBuf) {
         self.solidcraft_cli = Some(cli);
+    }
+
+    /// The program production files with `extension` open in (Settings > Production files).
+    pub fn set_file_app(&mut self, extension: &str, name: &str, command: &str) {
+        self.settings.file_apps.insert(extension.to_owned(), launcher::FileApp { name: name.to_owned(), command: command.to_owned() });
     }
 
     /// Which production files releasing makes (extensions: step, stl, 3mf).
@@ -1454,6 +1470,36 @@ impl App {
                     Err(e) => self.error(format!("Saving the production files: {e}")),
                 }
             }
+            Action::SetFileApp { extension, app } => match app {
+                Some(app) => {
+                    self.settings.file_apps.insert(extension, app);
+                }
+                None => {
+                    self.settings.file_apps.remove(&extension);
+                }
+            },
+            Action::OpenReleaseFile(file) => {
+                let Some(backend) = &self.backend else { return };
+                let extension = file.name.rsplit_once('.').map_or(String::new(), |(_, e)| e.to_ascii_lowercase());
+                let app = self.settings.file_apps.get(&extension).cloned();
+                let opened = backend.release_file_bytes(&file).and_then(|bytes| {
+                    // A copy under its own name (as the program shows it), in the temporary folder.
+                    let dir = std::env::temp_dir().join("solidcraft-pdm-files").join(&file.hash[..16]);
+                    let path = dir.join(&file.name);
+                    if !path.is_file() {
+                        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+                    }
+                    match &app {
+                        Some(app) => app.open(&path).map_err(|e| format!("{}: {e}", app.name)),
+                        None => launcher::open_with_system(&path).map_err(|e| e.to_string()),
+                    }
+                });
+                match opened {
+                    Ok(()) => self.info_msg(format!("Opened {}{}", file.name, app.map_or(String::new(), |a| format!(" in {}", a.name)))),
+                    Err(e) => self.error(format!("Could not open {}: {e}", file.name)),
+                }
+            }
             Action::SetReleaseFormat { extension, on } => {
                 self.settings.release_files.retain(|e| *e != extension);
                 if on {
@@ -1891,7 +1937,7 @@ impl App {
         let file = backend.absolute(path);
         let Some(launcher) = self.launcher() else {
             self.error("SolidCraft was not found. Choose its AppImage in Settings.");
-            self.dialog = Some(Dialog::Settings { open_command: self.settings.open_command.clone() });
+            self.open_settings(Section::Opening);
             return;
         };
         if let Err(e) = launcher.open(&file) {
@@ -1990,8 +2036,7 @@ impl App {
                 });
                 ui.separator();
                 if ui.button("Settings…").clicked() {
-                    self.detected = launcher::detect();
-                    self.dialog = Some(Dialog::Settings { open_command: self.settings.open_command.clone() });
+                    self.open_settings(Section::Opening);
                 }
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2023,8 +2068,7 @@ impl App {
                 let settings = ui.add(egui::Button::image(icons::image(ui, Icon::Settings, t.app_bar_text).fit_to_exact_size(egui::vec2(17.0, 17.0))).min_size(egui::vec2(30.0, 28.0)));
                 settings.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Settings"));
                 if settings.on_hover_text("Settings").clicked() {
-                    self.detected = launcher::detect();
-                    self.dialog = Some(Dialog::Settings { open_command: self.settings.open_command.clone() });
+                    self.open_settings(Section::Opening);
                 }
                 if let Some(release) = &self.update {
                     let label = format!("⬆ Update to {}", update::version_text(release.version));
@@ -2538,7 +2582,9 @@ impl App {
                         let block = text_height * (lines + 0.4);
                         ui.vertical(|ui| {
                             ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
-                            ui.add(egui::Label::new(highlighted(ui, file, &r.matches, theme::medium(size::HEADING - 0.5))).truncate().selectable(false));
+                            // Designs without their extension (the file name is in the details).
+                            let name = if matches!(r.item, Item::Design(_)) { without_design_extension(file) } else { file };
+                            ui.add(egui::Label::new(highlighted(ui, name, &r.matches, theme::medium(size::HEADING - 0.5))).truncate().selectable(false));
                             let sub = sub.iter().filter(|s| !s.is_empty()).map(String::as_str).collect::<Vec<_>>().join("  ·  ");
                             ui.add(egui::Label::new(RichText::new(sub).weak().small()).truncate().selectable(false));
                             if let Some(d) = description {
@@ -2814,7 +2860,7 @@ impl App {
                 if !lifecycle.releases.is_empty() {
                     let exporting = self.exporting.as_ref().is_some_and(|(p, _)| *p == entry.path)
                         || self.export_queue.iter().any(|r| r.path == entry.path);
-                    release_files_ui(ui, &entry.path, &lifecycle.releases, exporting, actions);
+                    release_files_ui(ui, &entry.path, &lifecycle.releases, exporting, &self.settings.file_apps, actions);
                 }
             }
 
@@ -3626,151 +3672,6 @@ impl App {
                         close |= ui.add(theme::secondary("Cancel")).clicked();
                     });
                 }
-                Dialog::Settings { open_command } => {
-                    ui.heading("Settings");
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("Opening designs").font(theme::semibold(size::HEADING)));
-                    match &self.detected {
-                        Some(found) => {
-                            ui.label(format!("SolidCraft found: {}", found.command[0]));
-                            ui.label(RichText::new(format!("from {}", found.source)).small().weak());
-                        }
-                        None => {
-                            ui.label("SolidCraft was not found (no desktop entry, not on PATH). Choose its AppImage below.");
-                        }
-                    }
-                    ui.add_space(6.0);
-                    ui.label("Use this program instead (optional):");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(open_command)
-                                .hint_text("e.g. ~/Applications/SolidCraft.AppImage")
-                                .desired_width(ui.available_width() - 90.0),
-                        );
-                        if ui.button("Browse…").clicked() {
-                            if let Some(file) = rfd::FileDialog::new().set_title("SolidCraft program or AppImage").pick_file() {
-                                *open_command = file.display().to_string();
-                            }
-                        }
-                    });
-                    ui.label(
-                        RichText::new("Leave empty to use SolidCraft as found. %f stands for the design; without it, the design is added at the end.")
-                            .small()
-                            .weak(),
-                    );
-                    ui.add_space(10.0);
-                    if let Some(Backend::Local(vault)) = &self.backend {
-                        ui.label(RichText::new("Revisions in this vault").font(theme::semibold(size::HEADING)));
-                        let current = vault.revision_scheme().unwrap_or(vault::RevisionScheme::Letters);
-                        ui.horizontal(|ui| {
-                            for (scheme, label) in [
-                                (vault::RevisionScheme::Letters, "Letters: A, B, C … (no I, O, Q, S, X, Z)"),
-                                (vault::RevisionScheme::Numbers, "Numbers: 01, 02, 03 …"),
-                            ] {
-                                if ui.radio(current == scheme, label).clicked() && current != scheme {
-                                    actions.push(Action::SetScheme(scheme));
-                                }
-                            }
-                        });
-                        ui.label(RichText::new("Applies to the next release of each design.").small().weak());
-                        ui.add_space(10.0);
-                    }
-                    #[cfg(not(windows))]
-                    menu_entry_settings(ui, actions);
-                    ui.label(RichText::new("Versions").font(theme::semibold(size::HEADING)));
-                    let mut auto = self.settings.auto_checkin;
-                    if ui.checkbox(&mut auto, "Check in automatically when a design is saved").changed() {
-                        actions.push(Action::SetAutoCheckin(auto));
-                    }
-                    ui.label(
-                        RichText::new("For one person: a saved design becomes the next version a few seconds later, new designs too. In a server vault where check-out is required, only designs you have checked out.")
-                            .small()
-                            .weak(),
-                    );
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Production files").font(theme::semibold(size::HEADING)));
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("When a design is released, make:");
-                        for (extension, hint) in crate::export::FORMATS {
-                            let mut on = self.settings.release_files.iter().any(|e| e == extension);
-                            if ui.checkbox(&mut on, extension.to_uppercase()).on_hover_text(hint).changed() {
-                                actions.push(Action::SetReleaseFormat { extension: extension.to_owned(), on });
-                            }
-                        }
-                    });
-                    ui.label(
-                        RichText::new("SolidCraft writes them from the released version; they are kept with the release, in the vault or on the server.")
-                            .small()
-                            .weak(),
-                    );
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Thumbnails").font(theme::semibold(size::HEADING)));
-                    let mut draw = self.settings.draw_thumbnails;
-                    if ui.checkbox(&mut draw, "Draw them with SolidCraft, with the edges outlined").changed() {
-                        actions.push(Action::SetDrawThumbnails(draw));
-                    }
-                    let found = self.renderer.as_ref().map(|r| r.found());
-                    let note = match found {
-                        Some(crate::render::Found::Program(p)) => format!("Drawn by {}. Kept in the cache, each version once.", p.display()),
-                        Some(crate::render::Found::Missing) => {
-                            "SolidCraft's command line program (solidcraft-cli) was not found: the pictures saved in the files are shown. Set SCPDM_SOLIDCRAFT_CLI to it, or choose SolidCraft above.".to_owned()
-                        }
-                        Some(crate::render::Found::NotYet) => "Looked for when the first picture is needed.".to_owned(),
-                        None => "Off: the pictures saved in the files are shown.".to_owned(),
-                    };
-                    ui.label(RichText::new(note).small().weak());
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Updates").font(theme::semibold(size::HEADING)));
-                    ui.horizontal_wrapped(|ui| {
-                        let mut on = self.settings.check_updates;
-                        let automatic = self.install_kind.checks();
-                        let checkbox = ui.add_enabled(automatic, egui::Checkbox::new(&mut on, "Look for a new version once a day"));
-                        if checkbox.on_disabled_hover_text("Only the AppImage and the Windows installation look by themselves").changed() {
-                            actions.push(Action::SetUpdateChecks(on));
-                        }
-                        let checking = self.update_check.is_some();
-                        if ui.add_enabled(!checking, egui::Button::new("Check now")).clicked() {
-                            actions.push(Action::CheckForUpdates);
-                        }
-                        if checking {
-                            ui.spinner();
-                        }
-                    });
-                    ui.label(
-                        RichText::new(format!("This is version {}. Releases come from gitlab.com/randomlegend/solidcraft-pdm.", env!("CARGO_PKG_VERSION")))
-                            .small()
-                            .weak(),
-                    );
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Appearance").font(theme::semibold(size::HEADING)));
-                    ui.horizontal(|ui| {
-                        for (choice, label) in [(Appearance::System, "As the system"), (Appearance::Dark, "Dark"), (Appearance::Light, "Light")] {
-                            if ui.selectable_label(self.settings.appearance == choice, label).clicked() {
-                                actions.push(Action::SetAppearance(choice));
-                            }
-                        }
-                    });
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Interface size").font(theme::semibold(size::HEADING)));
-                    ui.horizontal_wrapped(|ui| {
-                        let current = ui.ctx().zoom_factor();
-                        for zoom in ZOOM_PRESETS {
-                            let selected = (current - zoom).abs() < 0.01;
-                            if ui.selectable_label(selected, format!("{:.0} %", zoom * 100.0)).clicked() {
-                                ui.ctx().set_zoom_factor(zoom);
-                            }
-                        }
-                    });
-                    ui.label(RichText::new("Also Ctrl + and Ctrl - anywhere, Ctrl 0 to reset.").small().weak());
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.add(theme::primary("Save", t)).clicked() {
-                            actions.push(Action::SetOpenCommand(open_command.clone()));
-                            close = true;
-                        }
-                        close |= ui.add(theme::secondary("Cancel")).clicked();
-                    });
-                }
             }
         });
         if close || modal.should_close() {
@@ -3823,7 +3724,13 @@ impl eframe::App for App {
         egui::Panel::top("app-bar").frame(bar).show(ui, |ui| self.top_bar(ui, &mut actions));
         let footer = egui::Frame::new().fill(t.footer).inner_margin(egui::Margin::symmetric(12, 5));
         egui::Panel::bottom("status").frame(footer).show(ui, |ui| self.status_bar(ui));
-        if self.backend.is_some() {
+        if self.settings_page.is_some() {
+            if self.dialog.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.close_settings(&mut actions);
+            }
+            let body = egui::Frame::new().fill(t.panel).inner_margin(egui::Margin { left: 24, right: 24, top: 18, bottom: 0 });
+            egui::CentralPanel::default().frame(body).show(ui, |ui| self.settings_ui(ui, &mut actions));
+        } else if self.backend.is_some() {
             let strip = egui::Frame::new().fill(t.toolbar).inner_margin(egui::Margin::symmetric(12, 8));
             egui::Panel::top("toolbar").frame(strip).show(ui, |ui| self.toolbar(ui, &mut actions));
             let nav = egui::Frame::new().fill(t.footer).inner_margin(egui::Margin { left: 8, right: 8, top: 10, bottom: 8 });
@@ -3990,7 +3897,6 @@ enum Sameness {
 #[cfg(not(windows))]
 fn menu_entry_settings(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
     let (Some(data), Some(program)) = (crate::menu_entry::data_home(), crate::menu_entry::program()) else { return };
-    ui.label(RichText::new("Application menu").font(theme::semibold(size::HEADING)));
     ui.horizontal_wrapped(|ui| match crate::menu_entry::installed(&data) {
         Some(p) if p == program => {
             ui.label("SolidCraft PDM is in the application menu.");
@@ -4015,7 +3921,6 @@ fn menu_entry_settings(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
     });
     ui.label(RichText::new(format!("Starts {}", program.display())).small().weak());
     ui.label(RichText::new("With its icon, which also gives it the right icon in the dock on Wayland.").small().weak());
-    ui.add_space(10.0);
 }
 
 /// A table cell: text, a status (dot and text), or a pill.
@@ -4114,7 +4019,14 @@ fn lifecycle_ui(ui: &mut egui::Ui, entry: &Entry, lifecycle: &vault::Lifecycle, 
 }
 
 /// A design's production files, by release (newest first), and making them.
-fn release_files_ui(ui: &mut egui::Ui, path: &str, releases: &[vault::Release], exporting: bool, actions: &mut Vec<Action>) {
+fn release_files_ui(
+    ui: &mut egui::Ui,
+    path: &str,
+    releases: &[vault::Release],
+    exporting: bool,
+    apps: &BTreeMap<String, launcher::FileApp>,
+    actions: &mut Vec<Action>,
+) {
     let count: usize = releases.iter().map(|r| r.files.len()).sum();
     let t = theme::tokens(ui);
     egui::CollapsingHeader::new(RichText::new(format!("Production files ({count})")).font(theme::semibold(size::HEADING)))
@@ -4146,12 +4058,26 @@ fn release_files_ui(ui: &mut egui::Ui, path: &str, releases: &[vault::Release], 
                 });
                 for file in &release.files {
                     ui.horizontal(|ui| {
-                        ui.add_space(8.0);
-                        ui.label(RichText::new(&file.name).font(egui::FontId::monospace(size::SMALL + 0.5)));
-                        ui.label(RichText::new(human_size(file.size)).small().color(t.text_dim));
-                        if ui.small_button("Save…").clicked() {
-                            actions.push(Action::SaveReleaseFile(file.clone()));
-                        }
+                        ui.add_space(4.0);
+                        icons::show(ui, Icon::for_file(&file.name), 22.0, t.text);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(RichText::new(&file.name).font(egui::FontId::monospace(size::SMALL + 0.5)));
+                            ui.label(RichText::new(human_size(file.size)).small().color(t.text_dim));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Save…").clicked() {
+                                actions.push(Action::SaveReleaseFile(file.clone()));
+                            }
+                            let extension = file.name.rsplit_once('.').map_or(String::new(), |(_, e)| e.to_ascii_lowercase());
+                            let (label, hint) = match apps.get(&extension) {
+                                Some(app) => (format!("Open in {}", app.name), format!("Settings > Production files chooses the program for {} files", extension.to_uppercase())),
+                                None => ("Open".to_owned(), format!("With the system's program for {} files; Settings > Production files chooses another, a slicer say", extension.to_uppercase())),
+                            };
+                            if ui.small_button(label).on_hover_text(hint).clicked() {
+                                actions.push(Action::OpenReleaseFile(file.clone()));
+                            }
+                        });
                     });
                 }
             }
@@ -4418,6 +4344,14 @@ fn drag_label(ctx: &egui::Context) {
                 ui.label(format!("Move {file} to…"));
             });
         });
+}
+
+/// A design's file name as the list shows it: `pi4-case`, not `pi4-case.solidcraft`.
+fn without_design_extension(file: &str) -> &str {
+    match file.rsplit_once('.') {
+        Some((stem, "solidcraft" | "solvecraft")) if !stem.is_empty() => stem,
+        _ => file,
+    }
 }
 
 /// `text` in the strong text colour, with the chars at `matches` highlighted.
