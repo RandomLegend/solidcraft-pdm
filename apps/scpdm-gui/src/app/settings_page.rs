@@ -256,14 +256,45 @@ impl App {
     }
 
     fn appearance(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let themed = !self.settings.theme.is_empty();
         card(ui, "Theme", |ui| {
             ui.horizontal(|ui| {
                 for (choice, label) in [(Appearance::System, "As the system"), (Appearance::Dark, "Dark"), (Appearance::Light, "Light")] {
-                    if ui.selectable_label(self.settings.appearance == choice, label).clicked() {
+                    if ui.selectable_label(!themed && self.settings.appearance == choice, label).clicked() {
                         actions.push(Action::SetAppearance(choice));
                     }
                 }
             });
+            note(ui, "SolidCraft's own colours, dark and light.");
+        });
+        card(ui, "SolidCraft's colour themes", |ui| {
+            let themes = super::all_themes(&self.settings);
+            let width = ((ui.available_width() - 16.0) / 3.0).max(150.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                for (theme, imported) in &themes {
+                    let selected = self.settings.theme == theme.id;
+                    let response = theme_tile(ui, theme, selected, width);
+                    if response.clicked() {
+                        actions.push(Action::SetTheme(theme.id.clone()));
+                    }
+                    if *imported {
+                        response.context_menu(|ui| {
+                            if ui.button("Remove this theme").clicked() {
+                                actions.push(Action::RemoveTheme(theme.id.clone()));
+                            }
+                        });
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Import a theme file…").clicked() {
+                    actions.push(Action::ImportTheme);
+                }
+                note(ui, "A solidcraft-theme/1 file, as SolidCraft exports one. Right-click an imported theme to remove it.");
+            });
+            note(ui, "The same themes as in SolidCraft 0.20 (Gruvbox, Catppuccin, Nord and more): the PDM looks like SolidCraft in the same theme.");
         });
         card(ui, "Interface size", |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -299,6 +330,23 @@ impl App {
             note(ui, &format!("This is version {}. Releases come from gitlab.com/randomlegend/solidcraft-pdm.", env!("CARGO_PKG_VERSION")));
         });
     }
+}
+
+/// A theme to pick: its name and four swatches; drawn selected when it is the one in use.
+fn theme_tile(ui: &mut egui::Ui, theme: &crate::themes::ThemeFile, selected: bool, width: f32) -> egui::Response {
+    let t = theme::tokens(ui);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 44.0), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &theme.name));
+    let [panel, bar, accent, text] = theme.swatches();
+    let painter = ui.painter();
+    let stroke = if selected { egui::Stroke::new(2.0, t.accent) } else if response.hovered() { egui::Stroke::new(1.0, t.accent) } else { egui::Stroke::new(1.0, t.border) };
+    painter.rect(rect, egui::CornerRadius::same(theme::RADIUS), panel, stroke, egui::StrokeKind::Inside);
+    // The header strip and the accent, as the theme draws them.
+    let strip = egui::Rect::from_min_size(rect.min + egui::vec2(2.0, 2.0), egui::vec2(rect.width() - 4.0, 10.0));
+    painter.rect_filled(strip, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, bar);
+    painter.circle_filled(egui::pos2(rect.right() - 16.0, rect.center().y + 6.0), 6.0, accent);
+    painter.text(egui::pos2(rect.left() + 10.0, rect.center().y + 6.0), egui::Align2::LEFT_CENTER, &theme.name, theme::medium(size::BODY), text);
+    response.on_hover_text(if theme.dark { "Dark" } else { "Light" })
 }
 
 /// A group of settings with its title.

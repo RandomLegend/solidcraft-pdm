@@ -744,6 +744,37 @@ fn settings_are_a_page_with_sections() {
 }
 
 #[test]
+fn solidcraft_colour_themes_apply() {
+    let (_dir, _root, mut harness) = open_demo();
+    harness.state_mut().select("enclosure/pi4-lid.solidcraft");
+    settle(&mut harness);
+    harness.get_by_label("Settings").click();
+    harness.run_steps(3);
+    harness.get_by_label("Appearance").click();
+    harness.run_steps(3);
+    harness.get_by_label("Gruvbox Light");
+    harness.get_by_label("Nord");
+    for (name, panel, dark) in [("Catppuccin Mocha", egui::Color32::from_rgb(0x1e, 0x1e, 0x2e), true), ("Gruvbox Light", egui::Color32::from_rgb(0xfb, 0xf1, 0xc7), false)] {
+        harness.get_by_label(name).click();
+        harness.run_steps(4);
+        let visuals = harness.ctx.global_style().visuals.clone();
+        assert_eq!((visuals.dark_mode, visuals.panel_fill), (dark, panel), "{name}");
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(4);
+        screenshot(&mut harness, &format!("15-theme-{}", name.to_lowercase().replace(' ', "-")));
+        harness.get_by_label("Settings").click();
+        harness.run_steps(3);
+        harness.get_by_label("Appearance").click();
+        harness.run_steps(3);
+    }
+    screenshot(&mut harness, "15-themes");
+    // Back to SolidCraft's own colours.
+    harness.get_by_label("Dark").click();
+    harness.run_steps(3);
+    assert_ne!(harness.ctx.global_style().visuals.panel_fill, egui::Color32::from_rgb(0x1e, 0x1e, 0x2e));
+}
+
+#[test]
 fn edits_design_properties() {
     let (_dir, root, mut harness) = open_demo();
     harness.state_mut().select("enclosure/pi4-lid.solidcraft");

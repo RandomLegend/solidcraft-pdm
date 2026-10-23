@@ -64,6 +64,10 @@ struct Settings {
     check_updates: bool,
     /// Dark, light, or as the system is.
     appearance: Appearance,
+    /// One of SolidCraft's colour themes instead (its id; empty: none).
+    theme: String,
+    /// Theme files imported in the settings, as they were read.
+    imported_themes: Vec<String>,
     /// Saved designs become versions by themselves (one person's work: no manual check-in).
     auto_checkin: bool,
     /// Thumbnails drawn by SolidCraft with outlined edges (else the ones saved in the files).
@@ -89,6 +93,8 @@ impl Default for Settings {
             servers: Vec::new(),
             check_updates: true,
             appearance: Appearance::System,
+            theme: String::new(),
+            imported_themes: Vec::new(),
             auto_checkin: false,
             draw_thumbnails: true,
             release_files: crate::export::FORMATS.iter().map(|(ext, _)| (*ext).to_owned()).collect(),
@@ -338,6 +344,10 @@ enum Action {
     CheckForUpdates,
     SetUpdateChecks(bool),
     SetAppearance(Appearance),
+    /// One of SolidCraft's colour themes, by id.
+    SetTheme(String),
+    ImportTheme,
+    RemoveTheme(String),
     SetAutoCheckin(bool),
     SetDrawThumbnails(bool),
     /// Asks before deleting a design, then deletes it.
@@ -424,7 +434,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext, start: Option<PathBuf>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let settings: Settings = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
-        theme::install(&cc.egui_ctx, settings.appearance.preference());
+        theme::install(&cc.egui_ctx, settings.appearance.preference(), chosen_theme(&settings).map(|t| t.tokens()));
         // Only with settings storage, which the app always has (even on the first run); tests
         // have none and lay out at 100 %.
         if cc.storage.is_some() {
@@ -1525,7 +1535,33 @@ impl App {
             }
             Action::SetAppearance(choice) => {
                 self.settings.appearance = choice;
-                ctx.set_theme(choice.preference());
+                self.settings.theme.clear();
+                theme::apply(ctx, choice.preference(), None);
+            }
+            Action::SetTheme(id) => {
+                self.settings.theme = id;
+                theme::apply(ctx, self.settings.appearance.preference(), chosen_theme(&self.settings).map(|t| t.tokens()));
+            }
+            Action::ImportTheme => {
+                let Some(file) = rfd::FileDialog::new().set_title("A SolidCraft theme file").add_filter("Theme", &["json"]).pick_file() else { return };
+                let read = std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|text| crate::themes::parse(&text).map(|t| (t, text)));
+                match read {
+                    Ok((theme, text)) => {
+                        // A theme of the same name is replaced.
+                        self.settings.imported_themes.retain(|t| crate::themes::parse(t).is_ok_and(|old| old.id != theme.id));
+                        self.settings.imported_themes.push(text);
+                        self.settings.imported_themes.truncate(crate::themes::MAX_IMPORTED);
+                        self.info_msg(format!("Imported the theme {}", theme.name));
+                        self.apply(ctx, Action::SetTheme(imported_id(&theme.id)));
+                    }
+                    Err(e) => self.error(format!("{}: {e}", file.display())),
+                }
+            }
+            Action::RemoveTheme(id) => {
+                self.settings.imported_themes.retain(|t| crate::themes::parse(t).is_ok_and(|old| imported_id(&old.id) != id));
+                if self.settings.theme == id {
+                    self.apply(ctx, Action::SetAppearance(self.settings.appearance));
+                }
             }
             Action::SkipUpdate => {
                 if let Some(release) = self.update.take() {
@@ -2057,7 +2093,7 @@ impl App {
                 app_bar_divider(ui, t);
                 // The open vault, as a tab.
                 let (icon, title) = (if backend.is_remote() { Icon::Server } else { Icon::Folder }, backend.title());
-                egui::Frame::new().fill(Color32::from_rgb(0x35, 0x3B, 0x47)).corner_radius(egui::CornerRadius::same(theme::RADIUS)).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
+                egui::Frame::new().fill(t.app_bar_tab).corner_radius(egui::CornerRadius::same(theme::RADIUS)).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         icons::show(ui, icon, 15.0, t.app_bar_text);
                         ui.label(RichText::new(title).font(theme::medium(size::BODY)).color(t.app_bar_text));
@@ -2072,7 +2108,7 @@ impl App {
                 }
                 if let Some(release) = &self.update {
                     let label = format!("⬆ Update to {}", update::version_text(release.version));
-                    let button = egui::Button::new(RichText::new(label).font(theme::medium(size::BODY)).color(Color32::WHITE)).fill(t.accent).corner_radius(egui::CornerRadius::same(theme::RADIUS));
+                    let button = egui::Button::new(RichText::new(label).font(theme::medium(size::BODY)).color(t.on_primary)).fill(t.accent).corner_radius(egui::CornerRadius::same(theme::RADIUS));
                     if ui.add(button).on_hover_text("What is new, and installing it").clicked() {
                         self.dialog = Some(Dialog::Update { error: None });
                     }
@@ -2778,8 +2814,8 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 let present = entry.status != Status::Missing;
                 let open = egui::Button::image_and_text(
-                    icons::image(ui, Icon::OpenDesign, Color32::WHITE).fit_to_exact_size(egui::vec2(16.0, 16.0)),
-                    RichText::new("Open in SolidCraft").font(theme::medium(size::BUTTON)).color(Color32::WHITE),
+                    icons::image(ui, Icon::OpenDesign, t.on_primary).fit_to_exact_size(egui::vec2(16.0, 16.0)),
+                    RichText::new("Open in SolidCraft").font(theme::medium(size::BUTTON)).color(t.on_primary),
                 )
                 .fill(t.primary)
                 .stroke(egui::Stroke::new(1.0, t.primary))
@@ -4344,6 +4380,33 @@ fn drag_label(ctx: &egui::Context) {
                 ui.label(format!("Move {file} to…"));
             });
         });
+}
+
+/// An imported theme's id (kept apart from the built-in ones' ids).
+fn imported_id(id: &str) -> String {
+    format!("file:{id}")
+}
+
+/// The built-in themes, then the imported ones (with their ids).
+fn all_themes(settings: &Settings) -> Vec<(crate::themes::ThemeFile, bool)> {
+    let builtin = crate::themes::builtin().iter().map(|t| (t.clone(), false));
+    let imported = settings
+        .imported_themes
+        .iter()
+        .filter_map(|text| crate::themes::parse(text).ok())
+        .map(|mut t| {
+            t.id = imported_id(&t.id);
+            (t, true)
+        });
+    builtin.chain(imported).collect()
+}
+
+/// The colour theme chosen in the settings, if any.
+fn chosen_theme(settings: &Settings) -> Option<crate::themes::ThemeFile> {
+    if settings.theme.is_empty() {
+        return None;
+    }
+    all_themes(settings).into_iter().map(|(t, _)| t).find(|t| t.id == settings.theme)
 }
 
 /// A design's file name as the list shows it: `pi4-case`, not `pi4-case.solidcraft`.

@@ -30,6 +30,13 @@
 they are open, with their sections on the left: opening designs, production files, versions,
 thumbnails, appearance and updates. Changes apply at once; *Done* or Esc goes back.
 
+*Settings > Appearance* has SolidCraft's own colours (dark, light, or as the system) and the
+colour themes SolidCraft 0.20 comes with: Gruvbox (dark and light, each also hard and soft),
+Catppuccin Mocha, Nord, Tokyo Night, One Dark, Solarized Light, Nosferatu, Graphite, High
+Contrast, Blueprint, the phosphor screens, SolidCraft 95, Platinum 9 and Cupertino, so the PDM
+can look like SolidCraft in the same theme. *Import a theme file…* takes a theme exported from
+SolidCraft (a `solidcraft-theme/1` file); right-click an imported one to remove it.
+
 - **Top:** *+ New design* creates an empty design (name, folder, optional part number and
   description), checks it in as v1 and opens it in SolidCraft. *View* chooses the list columns
   (also by right-clicking the list header) and the interface size (also Ctrl + / Ctrl - /

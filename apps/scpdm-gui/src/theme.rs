@@ -1,6 +1,7 @@
 //! The look: SolidCraft's own design tokens (its `assets/styles/ui/palettes.rs`), fonts
 //! (IBM Plex Sans and Mono) and shapes, so the PDM reads as part of SolidCraft. Dark and
-//! light, following the system unless chosen in the settings.
+//! light, following the system unless chosen in the settings, or one of SolidCraft's colour
+//! themes (`themes`), which replaces the dark or the light palette.
 //!
 //! Colours are taken from [`Tokens`] only, through [`tokens`]; the pieces every screen uses
 //! (section titles, cards, pills, primary buttons, navigation rows) are here too.
@@ -24,6 +25,8 @@ pub struct Tokens {
     pub app_bar_text: Color32,
     pub app_bar_dim: Color32,
     pub app_bar_hover: Color32,
+    /// The open vault's tab in it.
+    pub app_bar_tab: Color32,
     /// Cards and menus, their footer band (and the navigation column).
     pub card: Color32,
     pub footer: Color32,
@@ -38,8 +41,9 @@ pub struct Tokens {
     pub label: Color32,
     pub accent: Color32,
     pub accent_soft: Color32,
-    /// Primary buttons and focus.
+    /// Primary buttons and focus, and their text.
     pub primary: Color32,
+    pub on_primary: Color32,
     pub selected_bg: Color32,
     pub selected_ink: Color32,
     pub hover: Color32,
@@ -69,6 +73,7 @@ pub const LIGHT: Tokens = Tokens {
     app_bar_text: hex(0xE6EAF2),
     app_bar_dim: hex(0x8891A0),
     app_bar_hover: Color32::from_rgba_premultiplied(28, 28, 28, 28),
+    app_bar_tab: hex(0x353B47),
     card: hex(0xFFFFFF),
     footer: hex(0xF4F6F9),
     border: hex(0xD0D4DC),
@@ -82,6 +87,7 @@ pub const LIGHT: Tokens = Tokens {
     accent: hex(0x2678DA),
     accent_soft: hex(0xD6E6FA),
     primary: hex(0x236EAD),
+    on_primary: Color32::WHITE,
     selected_bg: hex(0xE8F1FA),
     selected_ink: hex(0x1A507F),
     hover: hex(0xE2EAF6),
@@ -105,6 +111,7 @@ pub const DARK: Tokens = Tokens {
     app_bar_text: hex(0xE6EAF2),
     app_bar_dim: hex(0x8891A0),
     app_bar_hover: Color32::from_rgba_premultiplied(30, 30, 30, 30),
+    app_bar_tab: hex(0x353B47),
     card: hex(0x2E333D),
     footer: hex(0x2F343E),
     border: hex(0x3F4552),
@@ -118,6 +125,7 @@ pub const DARK: Tokens = Tokens {
     accent: hex(0x3A88EE),
     accent_soft: hex(0x2A466E),
     primary: hex(0x3A88EE),
+    on_primary: Color32::WHITE,
     selected_bg: hex(0x2A466E),
     selected_ink: hex(0x9CC7F5),
     hover: hex(0x363D4A),
@@ -131,13 +139,25 @@ pub const DARK: Tokens = Tokens {
     icon: hex(0xDBE4EE),
 };
 
+/// A colour theme in place of the dark or the light palette (see [`apply`]).
+static THEMED: std::sync::RwLock<Option<&'static Tokens>> = std::sync::RwLock::new(None);
+
+/// The palette for dark or light: the colour theme's, if it is one.
+fn palette(dark: bool) -> &'static Tokens {
+    match *THEMED.read().unwrap_or_else(|e| e.into_inner()) {
+        Some(t) if t.dark == dark => t,
+        _ if dark => &DARK,
+        _ => &LIGHT,
+    }
+}
+
 /// The tokens of the theme `ui` is drawn in.
 pub fn tokens(ui: &egui::Ui) -> &'static Tokens {
-    if ui.visuals().dark_mode { &DARK } else { &LIGHT }
+    palette(ui.visuals().dark_mode)
 }
 
 pub fn tokens_of(ctx: &egui::Context) -> &'static Tokens {
-    if ctx.global_style().visuals.dark_mode { &DARK } else { &LIGHT }
+    palette(ctx.global_style().visuals.dark_mode)
 }
 
 static DARK_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -149,7 +169,7 @@ pub fn begin_frame(ctx: &egui::Context) {
 
 /// The tokens of the theme the window is drawn in (for code without a `Ui` at hand).
 pub fn now() -> &'static Tokens {
-    if DARK_NOW.load(std::sync::atomic::Ordering::Relaxed) { &DARK } else { &LIGHT }
+    palette(DARK_NOW.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 // ---- fonts ----
@@ -278,12 +298,24 @@ fn style(t: &Tokens) -> egui::Style {
     style
 }
 
-/// Fonts and both themes' styles; `preference` as chosen in the settings.
-pub fn install(ctx: &egui::Context, preference: egui::ThemePreference) {
+/// Fonts and the styles; `preference` and `themed` as chosen in the settings.
+pub fn install(ctx: &egui::Context, preference: egui::ThemePreference, themed: Option<Tokens>) {
     ctx.set_fonts(fonts());
-    ctx.set_style_of(Theme::Light, style(&LIGHT));
-    ctx.set_style_of(Theme::Dark, style(&DARK));
-    ctx.set_theme(preference);
+    apply(ctx, preference, themed);
+}
+
+/// Dark, light or as the system (`preference`), or a colour theme, which is dark or light itself.
+pub fn apply(ctx: &egui::Context, preference: egui::ThemePreference, themed: Option<Tokens>) {
+    // Kept for good: changed only when someone picks another theme.
+    let themed: Option<&'static Tokens> = themed.map(|t| &*Box::leak(Box::new(t)));
+    *THEMED.write().unwrap_or_else(|e| e.into_inner()) = themed;
+    ctx.set_style_of(Theme::Light, style(palette(false)));
+    ctx.set_style_of(Theme::Dark, style(palette(true)));
+    ctx.set_theme(match themed {
+        Some(t) if t.dark => egui::ThemePreference::Dark,
+        Some(_) => egui::ThemePreference::Light,
+        None => preference,
+    });
 }
 
 // ---- pieces ----
@@ -323,7 +355,7 @@ pub fn card(t: &Tokens) -> egui::Frame {
 
 /// A primary (filled, accent) button.
 pub fn primary(text: impl Into<String>, t: &Tokens) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text.into()).font(medium(size::BUTTON)).color(Color32::WHITE))
+    egui::Button::new(RichText::new(text.into()).font(medium(size::BUTTON)).color(t.on_primary))
         .fill(t.primary)
         .stroke(Stroke::new(1.0, t.primary))
         .min_size(egui::vec2(0.0, CONTROL_HEIGHT))

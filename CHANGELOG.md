@@ -12,6 +12,8 @@ whose heading starts with `## <version>`.
 - Production files have icons, and *Open* or *Open in …*: the program for each type is chosen in
   *Settings > Production files* (installed slicers and CAD programs are offered).
 - The list shows designs without their `.solidcraft` ending.
+- SolidCraft's colour themes (the 20 of SolidCraft 0.20: Gruvbox, Catppuccin Mocha, Nord, Tokyo
+  Night and more) in *Settings > Appearance*, and importing a theme file exported from SolidCraft.
 - Checked with SolidCraft 0.20 (formats 30 and 31): nothing changes for the PDM.
 
 ### CI

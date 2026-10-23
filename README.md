@@ -54,7 +54,8 @@ optional [team server](#team-server).
   parts are updated. Reference images (PNG, JPEG, WebP) show up next to the designs in their
   folder.
 - **Made for SolidCraft.** Double-click opens a design in SolidCraft as installed, also as an
-  AppImage; *+ New design* starts one. The interface scales up to 250 % for large screens.
+  AppImage; *+ New design* starts one. The interface scales up to 250 % for large screens, and
+  takes SolidCraft's colour themes (Gruvbox, Catppuccin, Nord and more, or a theme file).
 
 More in the [guide](docs/guide.md).
 
@@ -201,5 +202,7 @@ The test fixtures and the designs in the screenshots are SolidCraft's own sample
 (MIT/Apache-2.0, from [tangency-labs/solidcraft](https://github.com/tangency-labs/solidcraft));
 their thumbnails were rendered by SolidCraft. The look follows SolidCraft's: its colour tokens,
 its icons (`assets/icons/solidcraft/`, MIT/Apache-2.0, unmodified; a few in their style in
-`assets/icons/pdm/`) and its interface fonts, IBM Plex Sans and Mono by IBM
+`assets/icons/pdm/`), its colour themes (`assets/themes/`, MIT/Apache-2.0, unmodified; some
+map published palettes such as Gruvbox, Catppuccin, Nord and Dracula, MIT, credited in
+`assets/themes/README.md`) and its interface fonts, IBM Plex Sans and Mono by IBM
 (`assets/fonts/`, SIL Open Font License 1.1, see `assets/fonts/OFL-IBM-Plex.txt`).

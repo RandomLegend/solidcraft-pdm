@@ -12,4 +12,5 @@ mod menu_entry;
 mod scan;
 mod search;
 pub mod theme;
+mod themes;
 mod update;
