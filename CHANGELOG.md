@@ -3,6 +3,18 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
+## Unreleased
+
+### App and server
+
+- `.sc` designs, SolidCraft's extension since 0.25, alongside `.solidcraft` and `.solvecraft`
+  (any letter case): in vaults, on the server, in workspaces and on the command line. New designs
+  are `.sc`; a name typed with `.solidcraft` keeps that extension.
+- SolidCraft 0.25's new desktop entry (`io.tangencylabs.solidcraft`) is found, and preferred over
+  an older SolidCraft's entry still installed.
+- Checked with SolidCraft 0.25.1 (format 41): reading, editing properties, releasing and
+  exporting work unchanged.
+
 ## 0.2.6 — 2026-10-23
 
 ### App

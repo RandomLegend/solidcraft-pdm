@@ -150,8 +150,8 @@ impl DesignInfo {
 }
 
 /// A new, empty design: plain JSON in format 1, which every SolidCraft release opens and upgrades
-/// (checked with SolidCraft 0.18.3 and 0.20.0: they open such a file, save it as a container in
-/// their format, `solidcraft/29` or `solidcraft/31`, and keep the properties). `properties` are
+/// (checked with SolidCraft 0.18.3, 0.20.0 and 0.25.1, also named `.sc`: they open such a file,
+/// save it as a container in their format, up to `solidcraft/41`, and keep the properties). `properties` are
 /// well-known `metadata` keys such as `part_number`; empty values are left out.
 pub fn new_design(name: &str, properties: &[(&str, &str)]) -> Vec<u8> {
     let metadata: serde_json::Map<String, serde_json::Value> = properties

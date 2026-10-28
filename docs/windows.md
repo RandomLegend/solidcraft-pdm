@@ -52,7 +52,7 @@ The screenshot mode of the UI tests (`SCPDM_SCREENSHOTS`) needs a GPU adapter.
 
 | Area | Windows behaviour | Where |
 |---|---|---|
-| Opening designs | `solidcraft.exe` from `Program Files\SolidCraft` (or `%LOCALAPPDATA%\Programs\SolidCraft`), where SolidCraft's installer puts it; otherwise the `.solidcraft` file association, which the installer also registers | `apps/scpdm-gui/src/launcher.rs` |
+| Opening designs | `solidcraft.exe` from `Program Files\SolidCraft` (or `%LOCALAPPDATA%\Programs\SolidCraft`), where SolidCraft's installer puts it; otherwise the file association for designs (`.sc`, `.solidcraft`), which the installer also registers | `apps/scpdm-gui/src/launcher.rs` |
 | Opening images | the file association (`explorer.exe <file>`) | `launcher::open_with_system` |
 | Show in folder | `explorer.exe /select,"<file>"` | `launcher::show_in_folder` |
 | Console window | none (`windows_subsystem = "windows"`) | `apps/scpdm-gui/src/main.rs` |

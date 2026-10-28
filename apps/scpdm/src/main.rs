@@ -120,11 +120,9 @@ fn run(command: Command) -> Result {
         Command::Status => status(),
         Command::New { file, part_number, description } => {
             let mut vault = Vault::discover(".")?;
-            let mut path = vault.relative(&file)?;
-            if !path.ends_with(".solidcraft") {
-                path.push_str(".solidcraft");
-            }
-            let name = path.rsplit('/').next().unwrap_or(&path).trim_end_matches(".solidcraft").to_owned();
+            // `.sc` as SolidCraft names new designs, unless the name has a design extension.
+            let path = vault::new_design_name(&vault.relative(&file)?);
+            let name = vault::design_stem(path.rsplit('/').next().unwrap_or(&path)).to_owned();
             let bytes = scformat::new_design(
                 &name,
                 &[

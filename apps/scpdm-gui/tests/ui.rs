@@ -408,11 +408,12 @@ fn creates_a_new_design_and_opens_it() {
     harness.get_by_label("+ New design").click();
     harness.run_steps(3);
     type_text(&mut harness, "wall-bracket");
-    harness.get_by_label("Creates enclosure/wall-bracket.solidcraft as v1");
+    // `.sc`, as SolidCraft names new designs since 0.25.
+    harness.get_by_label("Creates enclosure/wall-bracket.sc as v1");
     harness.key_press(egui::Key::Enter);
     settle(&mut harness);
 
-    let file = root.join("enclosure/wall-bracket.solidcraft");
+    let file = root.join("enclosure/wall-bracket.sc");
     let info = scformat::read_file(&file).unwrap();
     assert_eq!(info.name.as_deref(), Some("wall-bracket"));
     assert_eq!(opened_lines(&log, 1), [file.display().to_string()]);
@@ -532,6 +533,9 @@ fn new_design_from_a_right_click_in_the_list() {
     harness.get_by_label("New design here…").click();
     harness.run_steps(3);
     type_text(&mut harness, "gasket");
+    harness.get_by_label("Creates assembly/gasket.sc as v1");
+    // The older extension, for an older SolidCraft, when typed.
+    type_text(&mut harness, ".solidcraft");
     harness.get_by_label("Creates assembly/gasket.solidcraft as v1");
 }
 

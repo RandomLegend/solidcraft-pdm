@@ -1737,7 +1737,7 @@ impl App {
             Action::CreateDesign { path, part_number, description, open } => {
                 let Some(backend) = &mut self.backend else { return };
                 let (folder, file) = path.rsplit_once('/').unwrap_or(("", &path));
-                let name = file.strip_suffix(".solidcraft").unwrap_or(file);
+                let name = vault::design_stem(file);
                 let bytes = scformat::new_design(name, &[("part_number", &part_number), ("description", &description)]);
                 match backend.add_new(&path, &bytes, "New design") {
                     Ok(_) => {
@@ -2619,7 +2619,7 @@ impl App {
                         ui.vertical(|ui| {
                             ui.add_space(((ui.available_height() - block) / 2.0).max(0.0));
                             // Designs without their extension (the file name is in the details).
-                            let name = if matches!(r.item, Item::Design(_)) { without_design_extension(file) } else { file };
+                            let name = if matches!(r.item, Item::Design(_)) { vault::design_stem(file) } else { file };
                             ui.add(egui::Label::new(highlighted(ui, name, &r.matches, theme::medium(size::HEADING - 0.5))).truncate().selectable(false));
                             let sub = sub.iter().filter(|s| !s.is_empty()).map(String::as_str).collect::<Vec<_>>().join("  ·  ");
                             ui.add(egui::Label::new(RichText::new(sub).weak().small()).truncate().selectable(false));
@@ -3680,8 +3680,9 @@ impl App {
                         ui.add(egui::TextEdit::singleline(description).hint_text("optional").desired_width(260.0));
                         ui.end_row();
                     });
-                    let stem = typed_path(name).trim_end_matches(".solidcraft").to_owned();
-                    let file = format!("{stem}.solidcraft");
+                    // `.sc` unless another design extension is typed.
+                    let file = vault::new_design_name(&typed_path(name));
+                    let stem = vault::design_stem(&file).to_owned();
                     let path = if folder.is_empty() { file.clone() } else { format!("{folder}/{file}") };
                     let valid = !stem.is_empty() && !stem.contains('/') && !stem.starts_with('.');
                     let exists = valid && self.backend.as_ref().is_some_and(|v| v.absolute(&path).exists());
@@ -4407,14 +4408,6 @@ fn chosen_theme(settings: &Settings) -> Option<crate::themes::ThemeFile> {
         return None;
     }
     all_themes(settings).into_iter().map(|(t, _)| t).find(|t| t.id == settings.theme)
-}
-
-/// A design's file name as the list shows it: `pi4-case`, not `pi4-case.solidcraft`.
-fn without_design_extension(file: &str) -> &str {
-    match file.rsplit_once('.') {
-        Some((stem, "solidcraft" | "solvecraft")) if !stem.is_empty() => stem,
-        _ => file,
-    }
 }
 
 /// `text` in the strong text colour, with the chars at `matches` highlighted.

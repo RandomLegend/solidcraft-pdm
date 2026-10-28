@@ -872,9 +872,31 @@ pub(crate) fn check_path(path: &str) -> Result<()> {
     if ok { Ok(()) } else { Err(Error::InvalidPath(path.to_owned())) }
 }
 
-/// Whether `path` names a SolidCraft design (`.solidcraft`, or the legacy `.solvecraft`).
+/// The extension SolidCraft gives new designs (since 0.25).
+pub const DESIGN_EXT: &str = "sc";
+/// Every extension a design may have, as SolidCraft opens them: `.sc`, then `.solidcraft` (up to
+/// 0.24) and `.solvecraft` (before the rename). SolidCraft saves a design under its own name, so
+/// all three stay in use.
+pub const DESIGN_EXTS: [&str; 3] = [DESIGN_EXT, "solidcraft", "solvecraft"];
+
+/// Whether `path` names a SolidCraft design (`.sc`, `.solidcraft` or `.solvecraft`, any case).
 pub fn is_design(path: &Path) -> bool {
-    matches!(path.extension().and_then(|e| e.to_str()), Some("solidcraft" | "solvecraft"))
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| DESIGN_EXTS.iter().any(|d| e.eq_ignore_ascii_case(d)))
+}
+
+/// A new design's file name: as given when it has a design extension (`.solidcraft` to suit an
+/// older SolidCraft, say), else with `.sc`, as SolidCraft names new designs.
+pub fn new_design_name(name: &str) -> String {
+    if is_design(Path::new(name)) { name.to_owned() } else { format!("{name}.{DESIGN_EXT}") }
+}
+
+/// A design's file name without its extension (`pi4-case` for `pi4-case.sc`); other names as
+/// they are.
+pub fn design_stem(file_name: &str) -> &str {
+    match file_name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && DESIGN_EXTS.iter().any(|d| ext.eq_ignore_ascii_case(d)) => stem,
+        _ => file_name,
+    }
 }
 
 /// Whether `path` names a reference image (PNG, JPEG or WebP; any letter case).

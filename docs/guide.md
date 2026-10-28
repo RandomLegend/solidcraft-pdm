@@ -3,7 +3,9 @@
 ## Concepts
 
 - A **vault** is a folder of designs with a hidden `.pdm/` folder. Your files stay ordinary files
-  that SolidCraft opens and saves as before.
+  that SolidCraft opens and saves as before. Designs are `.sc` files (SolidCraft's extension
+  since 0.25) or `.solidcraft` (earlier releases; SolidCraft still opens them and saves them under
+  that name), also mixed in one vault.
 - **Check in** records a file's current content as its next version (v1, v2, …) with a comment.
 - Each design is **Untracked**, **Up to date**, **Modified** (changed since its last version)
   or **Missing** (tracked, but the file is gone).
@@ -47,7 +49,7 @@ SolidCraft (a `solidcraft-theme/1` file); right-click an imported one to remove 
   *Move to* in a design's right-click menu, to move them with their history.
 - **Middle:** designs, and in folder views also the folder's reference images (PNG, JPEG,
   WebP): shown with a thumbnail, opened in your image viewer on double-click, moved like
-  designs, but not versioned. Designs are listed without their `.solidcraft` ending (the details
+  designs, but not versioned. Designs are listed without their `.sc` or `.solidcraft` ending (the details
   show the whole file name). Right-click a row, or below the list, for *New design here…*.
   The search bar (Ctrl+F, Esc clears) searches the whole vault, whatever folder is selected:
   fuzzy and ranked, each word matched within the file name, design name, part number,
@@ -71,16 +73,20 @@ so saving in SolidCraft shows up as *Modified* by itself.
 
 Double-click opens a design in SolidCraft as installed: the app finds SolidCraft's desktop entry
 (the one the AppImage installs on its first run, or one from Gear Lever, AppImageLauncher,
-appimaged, Flatpak or a package) and runs its `Exec` line, else `solidcraft` on `PATH`. It does
-not use `xdg-open`: the AppImage registers no MIME type for `*.solidcraft`, so `xdg-open`
-guesses from the contents (ZIP or JSON) and may pick an unrelated program. *Settings > Opening designs* shows
+appimaged, Flatpak or a package; `io.tangencylabs.solidcraft` since SolidCraft 0.25, the newest
+when older ones are still installed) and runs its `Exec` line, else `solidcraft` on `PATH`. It
+does not use `xdg-open`: without SolidCraft's MIME type registered, `xdg-open` guesses (from
+the contents for `*.solidcraft`; `*.sc` is a Scala script to the system) and may pick an
+unrelated program. *Settings > Opening designs* shows
 what was found and takes another program or AppImage. On Windows see [windows.md](windows.md).
 
 ## New designs
 
-New designs are written as plain JSON in format 1, which every SolidCraft release opens and
-upgrades (checked with SolidCraft 0.18.3 and 0.20.0: they save such a file as a container in
-their format, `solidcraft/29` or `solidcraft/31`, and keep its properties).
+New designs are `.sc` files, as SolidCraft names them since 0.25; type a name ending in
+`.solidcraft` to keep the older extension. They are written as plain JSON in format 1, which
+every SolidCraft release opens and upgrades (checked with SolidCraft 0.18.3, 0.20.0 and 0.25.1,
+which also open such a file named `.sc`: they save it as a container in their format, up to
+`solidcraft/41`, and keep its properties).
 
 ## Deleting designs
 

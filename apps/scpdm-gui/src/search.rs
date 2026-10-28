@@ -10,7 +10,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 /// The searchable text of one design.
 pub struct Haystack<'a> {
-    /// Matched without its extension: every design ends in `.solidcraft`, whose letters would
+    /// Matched without its extension: designs end in `.sc` or `.solidcraft`, whose letters would
     /// match almost any query ("lid" is in "so*lid*craft").
     pub file_name: &'a str,
     pub fields: Vec<&'a str>,

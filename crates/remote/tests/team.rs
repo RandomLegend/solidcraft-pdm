@@ -229,6 +229,18 @@ fn releases_keep_production_files_on_the_server() {
     assert_eq!(t.ben.object(&release.files[1].hash).unwrap(), b"solid lid");
 }
 
+#[test]
+fn sc_designs_go_through_the_server() {
+    let mut t = team();
+    // SolidCraft 0.25 names designs `.sc`.
+    write(&t.anna, "parts/clip.sc", &design("CLIP-1", 1));
+    t.anna.add("parts/clip.sc", "First clip").unwrap();
+    t.ben.status().unwrap();
+    assert!(t.ben.server_design("parts/clip.sc").is_some());
+    t.ben.get("parts/clip.sc").unwrap();
+    assert_eq!(fs::read_to_string(t.ben.absolute("parts/clip.sc")).unwrap(), design("CLIP-1", 1));
+}
+
 fn design_v1() -> String {
     design("LID-1", 1)
 }

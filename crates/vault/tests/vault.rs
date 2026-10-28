@@ -28,6 +28,24 @@ fn status(vault: &mut Vault, path: &str) -> Option<Status> {
 const CASE: &str = "enclosure/case.solidcraft";
 
 #[test]
+fn designs_are_sc_solidcraft_or_solvecraft_files() {
+    let (dir, mut vault) = setup();
+    fs::write(dir.path().join("enclosure/lid.sc"), design("P-2", 1)).unwrap();
+    fs::write(dir.path().join("enclosure/old.SolveCraft"), design("P-3", 1)).unwrap();
+    fs::write(dir.path().join("enclosure/script.scala"), "not a design").unwrap();
+    let paths: Vec<String> = vault.scan().unwrap().into_iter().map(|e| e.path).collect();
+    assert_eq!(paths, ["enclosure/case.solidcraft", "enclosure/lid.sc", "enclosure/old.SolveCraft"]);
+    assert_eq!(vault.check_in("enclosure/lid.sc", "v1").unwrap().number, 1);
+    assert_eq!(vault::design_stem("lid.sc"), "lid");
+    assert_eq!(vault::design_stem("case.solidcraft"), "case");
+    assert_eq!(vault::design_stem("photo.png"), "photo.png");
+    assert_eq!(vault::design_stem(".sc"), ".sc");
+    assert_eq!(vault::new_design_name("bracket"), "bracket.sc");
+    assert_eq!(vault::new_design_name("bracket.solidcraft"), "bracket.solidcraft");
+    assert_eq!(vault::new_design_name("v1.2"), "v1.2.sc");
+}
+
+#[test]
 fn scan_lists_designs_only() {
     let (_dir, mut vault) = setup();
     let entries = vault.scan().unwrap();

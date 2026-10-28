@@ -353,7 +353,7 @@ fn apply(vault: &mut Vault, user: &User, action: Action) -> Reply<Done> {
         Action::Add { path, hash, comment } => {
             let path = Vault::relative_path(&path)?;
             if !vault::is_design(std::path::Path::new(&path)) {
-                return Err(fail(StatusCode::BAD_REQUEST, ErrorCode::Invalid, format!("{path} is not a .solidcraft design")));
+                return Err(fail(StatusCode::BAD_REQUEST, ErrorCode::Invalid, format!("{path} is not a SolidCraft design (.sc, .solidcraft)")));
             }
             if vault.absolute(&path).exists() {
                 return Err(fail(StatusCode::CONFLICT, ErrorCode::Conflict, format!("{path} exists already")));

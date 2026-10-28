@@ -273,7 +273,19 @@ fn draw(cli: &Path, cache: &Path, hash: &str, shot: Shot, source: Source) -> Opt
 
 /// Runs a command to its end (at most [`TIMEOUT`]); whether it succeeded.
 fn run(command: &mut Command) -> bool {
-    let Ok(mut child) = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return false };
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // A program written a moment ago can be "busy" while another thread starts a process.
+    let mut tries = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    };
     let start = Instant::now();
     loop {
         match child.try_wait() {

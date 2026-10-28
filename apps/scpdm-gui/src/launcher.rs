@@ -2,20 +2,21 @@
 //! file manager.
 //!
 //! Linux: `xdg-open` is not used for designs. SolidCraft's AppImage installs a desktop entry
-//! (`ai.storyteller.solidcraft.desktop`, `Exec="/path/to/SolidCraft.AppImage" %F`) but no MIME
-//! type for `*.solidcraft`, so `xdg-open` guesses from the contents (a ZIP, or JSON) and opens
-//! whatever handles those. Instead SolidCraft's desktop entry is found the way a launcher finds
-//! it, and its `Exec` line is run.
+//! (`io.tangencylabs.solidcraft.desktop` since 0.25, `ai.storyteller.solidcraft.desktop` before;
+//! `Exec="/path/to/SolidCraft.AppImage" %F`) but not always a MIME type for its designs, so
+//! `xdg-open` guesses: from the contents for `*.solidcraft` (a ZIP, or JSON), and for `*.sc`,
+//! SolidCraft's extension since 0.25, Scala scripts are the system's own match. Instead
+//! SolidCraft's desktop entry is found the way a launcher finds it, and its `Exec` line is run.
 //!
 //! Windows: SolidCraft's installer puts `solidcraft.exe` in `Program Files\SolidCraft` and
-//! associates `.solidcraft` with it, so the program is looked for there, and the association
-//! is the fallback.
+//! associates its designs (`.sc`, `.solidcraft`) with it, so the program is looked for there,
+//! and the association is the fallback.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(not(windows))]
-const DESKTOP_IDS: [&str; 2] = ["ai.storyteller.solidcraft.desktop", "ai.storyteller.solvecraft.desktop"];
+const DESKTOP_IDS: [&str; 3] = ["io.tangencylabs.solidcraft.desktop", "ai.storyteller.solidcraft.desktop", "ai.storyteller.solvecraft.desktop"];
 #[cfg(not(windows))]
 const MIME_TYPE: &str = "application/x-solidcraft";
 
@@ -232,11 +233,12 @@ fn spawn(command: &mut Command) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 3 for SolidCraft's own desktop ids, else 0.
+/// SolidCraft's own desktop ids: 5 for the current one (0.25 on), 4 and 3 for the earlier ones,
+/// so a newer SolidCraft wins over an older one still installed; else 0.
 #[cfg(not(windows))]
 fn file_rank(file: &Path) -> u8 {
     let id = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if DESKTOP_IDS.contains(&id) { 3 } else { 0 }
+    DESKTOP_IDS.iter().position(|d| *d == id).map_or(0, |i| 5 - i as u8)
 }
 
 #[cfg(not(windows))]
@@ -541,9 +543,20 @@ mod tests {
             ),
         )
         .unwrap();
-        let found = detect_in(&[user.clone(), system], None).unwrap();
+        let found = detect_in(&[user.clone(), system.clone()], None).unwrap();
         assert_eq!(found.command, words(&[&appimage.to_string_lossy(), "%F"]));
         assert!(found.source.ends_with("ai.storyteller.solidcraft.desktop"));
+
+        // SolidCraft 0.25 renamed its entry; with both installed, the new one is used.
+        let newer = dir.path().join("Apps/SolidCraft-0.25.1-x86_64.AppImage");
+        std::fs::write(&newer, "").unwrap();
+        std::fs::write(
+            system.join("io.tangencylabs.solidcraft.desktop"),
+            format!("[Desktop Entry]\nType=Application\nName=SolidCraft\nExec=\"{}\" %f\nMimeType=application/x-solidcraft;\n", newer.display()),
+        )
+        .unwrap();
+        let found = detect_in(&[user, system], None).unwrap();
+        assert_eq!(found.command, words(&[&newer.to_string_lossy(), "%f"]));
     }
 
     #[cfg(not(windows))]
