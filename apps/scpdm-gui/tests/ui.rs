@@ -710,7 +710,8 @@ fn an_assembly_has_a_bill_of_materials_and_warns_about_unreleased_parts() {
     harness.run_steps(4);
     harness.get_by_label("Bill of materials").click();
     harness.run_steps(4);
-    harness.get_by_label("2 designs, 2 parts in all (through sub-assemblies)");
+    // The case is one linked component placed twice.
+    harness.get_by_label("2 rows, 3 parts in all (through sub-assemblies)");
     harness.get_by_label("Qty");
     // In the table, and in the list's Part number column.
     assert_eq!(harness.query_all_by_label("PI4-LID-020").count(), 2);
@@ -911,4 +912,43 @@ fn deleted_designs_wait_in_recently_deleted() {
     harness.get_by_label("Delete for good").click();
     harness.run_steps(3);
     assert!(Vault::open(&root).unwrap().deleted().unwrap().is_empty());
+}
+
+#[test]
+fn a_drawing_shows_what_it_draws_and_a_design_its_drawings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    demo_vault(&root);
+    // A SolidCraft 0.41 drawing of the lid and the assembly, in a container.
+    let drawing = serde_json::json!({
+        "format": "solidcraft-drawing/1",
+        "name": "Enclosure drawing",
+        "sources": [{"id": "0lid000000000", "path": "../enclosure/pi4-lid.solidcraft"}, {"id": "0asm000000000", "path": "pi4-enclosure.solidcraft"}],
+        "properties": {"part_number": "PI4-DWG-001"},
+        "language": "en-GB",
+        "sheets": [{"id": "0sheet0000000", "documents": {"source": "0asm000000000", "component": 0}}, {"id": "1sheet0000000", "documents": {"source": "0lid000000000", "component": 0}}],
+    });
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("container.json", zip::write::SimpleFileOptions::default()).unwrap();
+    std::io::Write::write_all(&mut zip, br#"{"content":"drawing","format":"solidcraft-container/1"}"#).unwrap();
+    zip.start_file("drawing.json", zip::write::SimpleFileOptions::default()).unwrap();
+    std::io::Write::write_all(&mut zip, &serde_json::to_vec_pretty(&drawing).unwrap()).unwrap();
+    fs::write(root.join("assembly/pi4-enclosure.scdwg"), zip.finish().unwrap().into_inner()).unwrap();
+    Vault::open(&root).unwrap().check_in("assembly/pi4-enclosure.scdwg", "First sheets").unwrap();
+
+    let start = root.clone();
+    let mut harness = Harness::builder().with_size([1280.0, 900.0]).with_step_dt(1.0 / 60.0).build_eframe(move |cc| App::new(cc, Some(start)));
+    settle(&mut harness);
+    harness.state_mut().select("assembly/pi4-enclosure.scdwg");
+    settle(&mut harness);
+    harness.get_by_label("Sheets");
+    assert!(harness.query_all_by_label("PI4-DWG-001").count() >= 2, "in the list and in the details");
+    harness.get_by_label("Draws (2)");
+    harness.get_by_label("enclosure/pi4-lid.solidcraft");
+    assert!(harness.query_by_label("Production files").is_none());
+
+    harness.state_mut().select("enclosure/pi4-lid.solidcraft");
+    settle(&mut harness);
+    harness.get_by_label("Drawings (1)");
+    harness.get_by_label("assembly/pi4-enclosure.scdwg");
 }

@@ -3,6 +3,33 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
+## Unreleased
+
+### App and server
+
+- SolidCraft 0.41 (design format 55, drawing format 1): designs read, edit and export as before.
+- Drawings (`.scdwg`, as a container or plain JSON) are kept like designs: versions, check-out,
+  releases (the revision goes into the drawing's properties), properties, deleting, on the
+  server and in workspaces. A drawing lists the designs it *Draws*, a design its *Drawings*;
+  moving a design updates the drawings that draw it, and a moved drawing keeps its sources.
+  No production files or thumbnails for drawings: SolidCraft's command line can't make them yet.
+- The bill of materials counts every placement of a component (a part inserted four times
+  through one link was counted once), follows components nested in the design, lists standard
+  parts and components defined in the design, and honours SolidCraft's bill of materials types
+  (phantom, reference, purchased, inseparable). The CSV has a *Type* column.
+- *Pack and go* also packs the drawings of the packed designs that draw nothing else.
+- Link fingerprints (SolidCraft 0.41 keeps the SHA-256 of each linked file, and shows a link as
+  changed when the file no longer has it): when the PDM changes a design without changing its
+  bodies (its properties, the revision a release writes, its links after a move), the
+  assemblies whose links knew it as it was take its new fingerprint, and so on up through
+  sub-assemblies, as SolidCraft's *Update Links* would. SolidCraft no longer reports those links
+  as changed. A link that already showed a real change keeps showing it; an assembly someone has
+  checked out is left alone. Such an assembly gets a version that keeps its release, as after a
+  move; the server reports them and workspaces fetch them.
+- *Compare* shows a link read again (a new fingerprint for the same file).
+- Tests use designs saved by SolidCraft 0.41 (`crates/scformat/tests/fixtures/sc041`), checked
+  against SolidCraft's own `component.links` and `assembly.bom`.
+
 ## 0.2.7 — 2026-10-28
 
 ### App and server

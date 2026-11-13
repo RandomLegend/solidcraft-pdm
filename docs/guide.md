@@ -115,15 +115,44 @@ as they are in the vault.
 
 ## Assemblies
 
-A design that links to others (an assembly) has a **Bill of materials** in its details: every
-design it uses with the quantity in all (two linked hinges with two screws each make four
-screws, plus the assembly's own), part number, name and revision, also through sub-assemblies.
+A design with components (an assembly) has a **Bill of materials** in its details, counted as
+SolidCraft counts it: every placement of a component is one piece, so a part inserted four
+times is four, also when the four copies share one link. Linked sub-assemblies bring their own
+parts along (two linked hinges with two screws each make four screws, plus the assembly's
+own), and so do components nested in the design. Standard parts (fasteners, pins, bearings)
+are rows by their size, and components defined in the design itself are rows of their own.
+Each component's bill of materials type, set in SolidCraft's *Part Properties*, counts too: a
+*phantom* has no row and what it holds counts in its parent, a *reference* counts nowhere, a
+*purchased* component is one row with nothing inside it counted, and an *inseparable* one
+(a welded frame) is one row of which only the purchased parts inside are counted. A linked
+design's row shows that design's own part number, description and revision (the vault's, after
+a release); the part properties in the assembly are used when the file can't be read.
 *Save as CSV…* writes it for a spreadsheet (quantity, part number, name, description, revision,
-state, file). **Pack and go…** writes a zip of the assembly and every design it uses, in their
-vault folders, so the links work wherever it is unpacked.
+type, state, file). **Pack and go…** writes a zip of the assembly, every design it links to
+(whatever their type: opening the assembly needs them all) and the drawings of them that draw
+nothing else, in their vault folders, so the links work wherever it is unpacked.
+
+SolidCraft 0.41 remembers the fingerprint of each design an assembly links to and shows the
+link as changed when the file is no longer the one it read. When the PDM changes a design
+without changing its shape (editing its properties, writing the revision when releasing it,
+updating its links after a move), it records the new fingerprint in the assemblies that link
+to it, and in the assemblies above them, as SolidCraft's *Update Links* would: SolidCraft keeps
+showing them as up to date. A link that already showed a change made in SolidCraft keeps
+showing it, and an assembly someone has checked out is not touched. Those assemblies get a
+version of their own (*Link to … brought up to date*) and stay released if they were.
 
 Releasing an assembly whose parts are not released (or changed since their release) asks first
 and names them: the release would link to working files that can still change.
+
+## Drawings
+
+SolidCraft 0.41's drawings (`.scdwg`), sheets that draw designs, are kept like designs: versions,
+check-out and check-in, releases (the revision is written into the drawing's properties), the
+same properties, deleting and restoring, on a server too. A drawing's details list the designs it
+**Draws**, and a design's details its **Drawings**. Moving or renaming a design updates the
+drawings that draw it, as it updates assemblies, and a moved drawing keeps finding its designs.
+SolidCraft's command line program does not export or draw drawings yet, so a drawing has no
+production files and no thumbnail of its own.
 
 ## Checking in automatically
 

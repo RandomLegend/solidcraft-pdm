@@ -278,3 +278,168 @@ fn a_feature_of_another_type_under_the_same_id_is_removed_and_added() {
     assert_eq!(got, [("Fillet2", FeatureChangeKind::Added), ("Sketch2", FeatureChangeKind::Removed)]);
     assert!(!c.features_reordered);
 }
+
+/// SolidCraft 0.41 (format 55): occurrences, part properties with a bill of materials type,
+/// standard parts, and links with the linked file's digest and inherited properties.
+#[test]
+fn reads_an_assembly_of_format_55() {
+    let doc = br#"{
+        "format": "solidcraft/55", "name": "Bench",
+        "components": [
+            {"id": 1, "name": "Leg", "metadata": {"part_number": "LEG-1", "bom_type": "purchased", "com.example.erp": {"sku": 4}}},
+            {"id": 2, "name": "Bolt", "metadata": "not an object"}
+        ],
+        "occurrences": [{"id": 3, "component": 1, "parent": 0, "name": "Leg:1"}, {"id": 4, "component": 1, "name": "Leg:2"}],
+        "parts": {"2": {"family": "ISO 4017", "size": "M8", "length": 40.0}},
+        "links": {"1": {"path": "leg.sc", "feature": 7, "file_sha256": "ab12", "inherited": [{"material": "Oak"}]}},
+        "notes": [{"id": 9, "text": "Sand"}],
+        "plugin_data": {"com.example/x.bin": "AAAA"}
+    }"#;
+    let info = scformat::read(Cursor::new(doc.to_vec())).unwrap();
+    assert_eq!(info.format_version(), Some(55));
+    assert_eq!(info.components[0].metadata.part_number.as_deref(), Some("LEG-1"));
+    assert_eq!(info.components[0].metadata.bom_type(), scformat::BomType::Purchased);
+    assert!(info.components[0].metadata.extensions.contains_key("com.example.erp"));
+    assert!(info.components[1].metadata.is_empty(), "properties that aren't an object read as none");
+    assert_eq!(info.occurrences.iter().map(|o| (o.component, o.parent)).collect::<Vec<_>>(), [(1, 0), (1, 0)]);
+    assert_eq!(info.standard_parts[&2].label(), "ISO 4017 M8 × 40");
+    assert_eq!(info.links.len(), 1);
+    assert_eq!(info.links[0].path, "leg.sc");
+}
+
+/// Designs saved before occurrences place each component once, in its parent.
+#[test]
+fn a_design_without_occurrences_places_each_component_once() {
+    let info = scformat::read_file(fixture("json-components.solidcraft")).unwrap();
+    assert_eq!(info.occurrences.len(), 3, "this one has them: Arm twice, its copy once");
+    let doc = br#"{"name": "Old", "components": [{"id": 1, "name": "A"}, {"id": 2, "name": "B", "parent": 1}]}"#;
+    let info = scformat::read(Cursor::new(doc.to_vec())).unwrap();
+    assert_eq!(info.occurrences.iter().map(|o| (o.component, o.parent)).collect::<Vec<_>>(), [(1, 0), (2, 1)]);
+}
+
+/// A drawing as SolidCraft 0.41 saves it (`Drawing::to_json`), drawing a part and an assembly.
+const DRAWING: &str = r#"{
+  "format": "solidcraft-drawing/1",
+  "name": "Plate assembly",
+  "sources": [
+    {
+      "id": "0bq3k5n7r9t1v",
+      "path": "plate.sc"
+    },
+    {
+      "id": "1cr4l6p8s0u2w",
+      "path": "../parts/bolt.sc"
+    }
+  ],
+  "properties": {
+    "part_number": "DWG-100",
+    "revision": "A",
+    "com.example.erp": {"id": 4}
+  },
+  "units": "follow_model",
+  "language": "en-GB",
+  "sheets": [
+    {
+      "id": "2ds5m7q9t1v3x",
+      "name": "Sheet 1",
+      "sheet": {"size": {"standard": "a3"}, "orientation": "landscape"},
+      "dpi": 300.0,
+      "documents": {"source": "0bq3k5n7r9t1v", "component": 0},
+      "excluded": {"count": false, "print": false}
+    }
+  ]
+}
+"#;
+
+fn drawing_container(drawing: &str) -> Vec<u8> {
+    container(&[(r#"container.json"#, br#"{"content":"drawing","format":"solidcraft-container/1"}"#), ("drawing.json", drawing.as_bytes())]).into_inner()
+}
+
+#[test]
+fn reads_a_drawing_as_json_and_as_a_container() {
+    for (bytes, encoding) in [(DRAWING.as_bytes().to_vec(), Encoding::Json), (drawing_container(DRAWING), Encoding::Container)] {
+        let info = scformat::read(Cursor::new(bytes)).unwrap();
+        assert_eq!((info.kind, info.encoding), (scformat::Kind::Drawing, encoding));
+        assert_eq!(info.format_version(), Some(1));
+        assert_eq!(info.name.as_deref(), Some("Plate assembly"));
+        assert_eq!(info.metadata.part_number.as_deref(), Some("DWG-100"));
+        assert!(info.metadata.extensions.contains_key("com.example.erp"));
+        assert_eq!(info.sheet_count, 1);
+        let links: Vec<(&str, Option<&str>)> = info.links.iter().map(|l| (l.path.as_str(), l.source.as_deref())).collect();
+        assert_eq!(links, [("plate.sc", Some("0bq3k5n7r9t1v")), ("../parts/bolt.sc", Some("1cr4l6p8s0u2w"))]);
+        assert!(info.occurrences.is_empty());
+    }
+    assert_eq!(scformat::kind_of(DRAWING.as_bytes()), scformat::Kind::Drawing);
+    assert_eq!(scformat::kind_of(&drawing_container(DRAWING)), scformat::Kind::Drawing);
+    assert_eq!(scformat::kind_of(&std::fs::read(fixture("container-cubeish.solidcraft")).unwrap()), scformat::Kind::Design);
+    assert_eq!(scformat::kind_of(b"not json"), scformat::Kind::Design);
+    // A design container says nothing of its content, and stays a design.
+    let info = scformat::read_file(fixture("container-cubeish.solidcraft")).unwrap();
+    assert_eq!(info.kind, scformat::Kind::Design);
+}
+
+#[test]
+fn a_container_of_content_this_version_does_not_know_is_refused() {
+    let bytes = container(&[("container.json", br#"{"content":"render","format":"solidcraft-container/1"}"#), ("render.json", b"{}")]);
+    assert!(matches!(scformat::read(bytes), Err(Error::UnsupportedContainer(_))));
+}
+
+#[test]
+fn edits_a_drawings_sources_and_properties_in_place() {
+    for bytes in [DRAWING.as_bytes().to_vec(), drawing_container(DRAWING)] {
+        let info = scformat::read(Cursor::new(bytes.clone())).unwrap();
+        let edited = scformat::edit_document(&bytes, |doc| {
+            info.links[1].set_path(doc, "../../parts/bolt.sc");
+            let key = scformat::properties_key(doc);
+            assert_eq!(key, "properties");
+            doc[key]["revision"] = "B".into();
+        })
+        .unwrap();
+        let after = scformat::read(Cursor::new(edited.clone())).unwrap();
+        assert_eq!(after.links[0].path, "plate.sc");
+        assert_eq!(after.links[1].path, "../../parts/bolt.sc");
+        assert_eq!(after.metadata.revision.as_deref(), Some("B"));
+        let doc = scformat::read_document(&edited).unwrap();
+        assert_eq!(doc["sheets"][0]["documents"]["source"], "0bq3k5n7r9t1v", "ids untouched");
+        let compared = scformat::compare::compare(&bytes, &edited).unwrap();
+        let props: Vec<&str> = compared.properties.iter().map(|c| c.what.as_str()).collect();
+        assert_eq!(props, ["revision"]);
+    }
+}
+
+/// An assembly SolidCraft 0.41 saved (`fixtures/sc041`, its README).
+#[test]
+fn reads_an_assembly_solidcraft_041_saved() {
+    let info = scformat::read_file(fixture("sc041/asm/bench.sc")).unwrap();
+    assert_eq!((info.kind, info.encoding, info.format_version()), (scformat::Kind::Design, Encoding::Container, Some(55)));
+    assert_eq!(info.metadata.part_number.as_deref(), Some("ASM-1"));
+    let placed: Vec<u64> = info.occurrences.iter().map(|o| o.component).collect();
+    assert_eq!(placed, [1, 1, 5, 8], "the plate twice through one link, the pair, the screw");
+    assert_eq!(info.standard_parts[&8].family, "socket_head_cap_screw");
+    let screw = info.components.iter().find(|c| c.id == 8).unwrap();
+    assert_eq!((screw.name.as_str(), screw.metadata.part_number.as_deref()), ("SHCS M6x20", Some("ISO 4762 M6x20")));
+    let plate = std::fs::read(fixture("sc041/parts/plate.sc")).unwrap();
+    let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&plate));
+    assert_eq!(info.links[0].path, "../parts/plate.sc");
+    assert_eq!(info.links[0].file_sha256.as_deref(), Some(digest.as_str()), "the plate's bytes as saved");
+}
+
+#[test]
+fn a_link_read_again_shows_in_a_comparison_and_a_link_without_a_fingerprint_gets_none() {
+    let bytes = std::fs::read(fixture("sc041/asm/bench.sc")).unwrap();
+    let info = scformat::read(Cursor::new(bytes.clone())).unwrap();
+    let edited = scformat::edit_document(&bytes, |doc| info.links[0].set_file_sha256(doc, &"0".repeat(64))).unwrap();
+    let after = scformat::read(Cursor::new(edited.clone())).unwrap();
+    assert_eq!(after.links[0].file_sha256, Some("0".repeat(64)));
+    assert_eq!(after.links[1].file_sha256, info.links[1].file_sha256);
+    let compared = scformat::compare::compare(&bytes, &edited).unwrap();
+    let links: Vec<(&str, Option<&str>)> = compared.links.iter().map(|c| (c.what.as_str(), c.after.as_deref())).collect();
+    assert_eq!(links, [("plate", Some("../parts/plate.sc (read again)"))]);
+    assert!(compared.other.is_empty());
+
+    // A link saved before format 46 keeps none: SolidCraft takes it as up to date.
+    let old = br#"{"format": "solidcraft/40", "links": {"2": {"path": "lid.sc", "feature": 1}}}"#;
+    let info = scformat::read(Cursor::new(old.to_vec())).unwrap();
+    let edited = scformat::edit_document(old, |doc| info.links[0].set_file_sha256(doc, "ab")).unwrap();
+    assert_eq!(edited, old.to_vec());
+}

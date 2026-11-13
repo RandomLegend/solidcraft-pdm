@@ -153,6 +153,7 @@ fn run(command: Command) -> Result {
             };
             let r = vault.release_as(&path, &revision, &message)?;
             println!("{path}: released revision {} (v{})", r.revision, r.version);
+            print_link_updates(&vault.take_link_updates());
             Ok(())
         }
         Command::Revise { file } => {
@@ -278,6 +279,16 @@ fn log(file: &Path) -> Result {
 
 const PROPERTIES: [&str; 7] = ["part_number", "revision", "project", "description", "author", "organization", "license"];
 
+/// The assemblies whose link fingerprints an edit brought up to date.
+fn print_link_updates(updates: &[vault::LinkUpdate]) {
+    for u in updates {
+        match u.version {
+            Some(v) => println!("  link fingerprint brought up to date in {} (v{v})", u.path),
+            None => println!("  link fingerprint brought up to date in {} (with its unsaved changes)", u.path),
+        }
+    }
+}
+
 fn props(file: &Path, set: &[String], name: Option<&str>, check_in: bool) -> Result {
     let mut vault = Vault::discover(".")?;
     let path = vault.relative(file)?;
@@ -291,6 +302,7 @@ fn props(file: &Path, set: &[String], name: Option<&str>, check_in: bool) -> Res
             values.push((key, Some(value)));
         }
         vault.edit_properties(&path, name, &values)?;
+        print_link_updates(&vault.take_link_updates());
         if check_in {
             match vault.check_in(&path, "Edited properties") {
                 Ok(v) => println!("{path}: v{}", v.number),
@@ -409,6 +421,10 @@ fn info(file: &Path) -> Result {
     };
     println!("{}", file.display());
     row("name", d.name.as_deref());
+    let drawing = d.kind == scformat::Kind::Drawing;
+    if drawing {
+        row("kind", Some("drawing"));
+    }
     row("stored as", Some(encoding(&d)));
     row("format", Some(d.format.as_deref().unwrap_or("(pre-format legacy)")));
     row("units", d.units.as_deref());
@@ -419,10 +435,15 @@ fn info(file: &Path) -> Result {
     row("author", m.author.as_deref());
     row("organization", m.organization.as_deref());
     row("license", m.license.as_deref());
-    row("features", Some(&d.feature_count.to_string()));
-    row("parameters", Some(&d.param_count.to_string()));
-    row("components", Some(&d.components.len().to_string()));
-    if d.encoding == Encoding::Container {
+    if drawing {
+        row("sheets", Some(&d.sheet_count.to_string()));
+    } else {
+        row("features", Some(&d.feature_count.to_string()));
+        row("parameters", Some(&d.param_count.to_string()));
+        row("components", Some(&d.components.len().to_string()));
+        row("placements", Some(&d.occurrences.len().to_string()));
+    }
+    if d.encoding == Encoding::Container && !drawing {
         row("blobs", Some(&d.blob_count.to_string()));
         row("model cache", Some(yes_no(d.has_model_cache)));
         row("thumbnail", Some(yes_no(d.thumbnail_png.is_some())));
@@ -432,9 +453,13 @@ fn info(file: &Path) -> Result {
     }
     let folder = file.parent().unwrap_or(Path::new(""));
     for link in &d.links {
-        let component = d.components.iter().find(|c| c.id == link.component).map_or("?", |c| c.name.as_str());
         let status = if folder.join(&link.path).exists() { "" } else { "  (missing)" };
-        println!("{:<14}{component} → {}{status}", "link", link.path);
+        if drawing {
+            println!("{:<14}{}{status}", "draws", link.path);
+        } else {
+            let component = d.components.iter().find(|c| c.id == link.component).map_or("?", |c| c.name.as_str());
+            println!("{:<14}{component} → {}{status}", "link", link.path);
+        }
     }
     if let Ok(vault) = Vault::discover(folder.canonicalize().unwrap_or_default()) {
         if let Ok(history) = vault.relative(file).and_then(|p| vault.history(&p)) {
@@ -663,6 +688,9 @@ fn remote_command(command: RemoteCommand) -> Result {
             let done = ws.act_on_design(&path, protocol::Action::Release { path: path.clone(), revision, note: message })?;
             if let Some(r) = done.release {
                 println!("{path}: released revision {} (v{})", r.revision, r.version);
+            }
+            for u in &done.updated {
+                println!("  link fingerprint brought up to date in {u}");
             }
         }
         RemoteCommand::Log { file } => {

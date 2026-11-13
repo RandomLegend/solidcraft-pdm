@@ -64,6 +64,7 @@ pub fn compare(before: &[u8], after: &[u8]) -> crate::Result<Comparison> {
 const COMPARED: [&str; 9] = ["format", "name", "units", "metadata", "params", "features", "components", "links", "next_id"];
 
 pub fn compare_documents(a: &Value, b: &Value) -> Comparison {
+    let (a, b) = (&as_design(a), &as_design(b));
     let mut c = Comparison::default();
 
     for key in ["name", "units", "format"] {
@@ -113,6 +114,13 @@ pub fn compare_documents(a: &Value, b: &Value) -> Comparison {
             .and_then(|n: u64| cb.get(&n).or(ca.get(&n)).cloned())
             .unwrap_or_else(|| format!("component {id}"));
         push_change(&mut c.links, &label, la.get(&id).cloned(), lb.get(&id).cloned());
+        // The same file, read again: its fingerprint moved on (Update Links, or the PDM after
+        // changing only that file's properties).
+        let digest = |doc: &Value| doc["links"][&id]["file_sha256"].as_str().map(str::to_owned);
+        if la.contains_key(&id) && la.get(&id) == lb.get(&id) && digest(a) != digest(b) {
+            let path = lb[&id].clone();
+            c.links.push(Change { what: label, before: Some(path.clone()), after: Some(format!("{path} (read again)")) });
+        }
     }
 
     let (oa, ob) = (object(a), object(b));
@@ -195,4 +203,26 @@ fn union_keys<K: Ord + Clone, V>(a: &BTreeMap<K, V>, b: &BTreeMap<K, V>) -> Vec<
     keys.sort();
     keys.dedup();
     keys
+}
+
+/// A drawing in a design's shape, so it compares the same way: its `properties` as `metadata`
+/// and its `sources` as `links` (by source id). Its sheets differ as "other".
+fn as_design(doc: &Value) -> Value {
+    let mut doc = doc.clone();
+    if crate::properties_key(&doc) != "properties" {
+        return doc;
+    }
+    if let Some(top) = doc.as_object_mut() {
+        if let Some(properties) = top.shift_remove("properties") {
+            top.insert("metadata".into(), properties);
+        }
+        if let Some(Value::Array(sources)) = top.shift_remove("sources") {
+            let links: serde_json::Map<String, Value> = sources
+                .into_iter()
+                .filter_map(|s| Some((crate::source_id(s.get("id")?)?, serde_json::json!({"path": s.get("path")?.clone()}))))
+                .collect();
+            top.insert("links".into(), Value::Object(links));
+        }
+    }
+    doc
 }

@@ -208,7 +208,8 @@ pub struct Done {
     pub version: Option<VersionInfo>,
     pub release: Option<ReleaseInfo>,
     pub lock: Option<LockInfo>,
-    /// After a move: designs whose links were updated.
+    /// After a move: designs whose links were updated. After a release or a properties edit:
+    /// designs whose link fingerprints were brought up to date (SolidCraft 0.41).
     pub updated: Vec<String>,
 }
 

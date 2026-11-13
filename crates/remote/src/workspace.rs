@@ -532,13 +532,21 @@ impl Workspace {
     }
 
     /// An action on the server that changes a design there (release, properties…); the local
-    /// copy is fetched again when unchanged here.
+    /// copy, and those of the assemblies whose link fingerprints the server updated, are fetched
+    /// again when unchanged here.
     pub fn act_on_design(&mut self, path: &str, action: Action) -> Result<protocol::Done> {
         let done = self.client.act(&self.state.vault, &action)?;
         self.refresh_tree()?;
         if self.is_old_and_unchanged(path)? {
             self.get(path)?;
         }
+        // Assemblies whose link fingerprints the server brought up to date.
+        for other in &done.updated {
+            if other != path && self.is_old_and_unchanged(other)? {
+                self.get(other)?;
+            }
+        }
+        self.save()?;
         Ok(done)
     }
 

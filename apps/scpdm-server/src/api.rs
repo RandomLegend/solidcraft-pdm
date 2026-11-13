@@ -353,7 +353,7 @@ fn apply(vault: &mut Vault, user: &User, action: Action) -> Reply<Done> {
         Action::Add { path, hash, comment } => {
             let path = Vault::relative_path(&path)?;
             if !vault::is_design(std::path::Path::new(&path)) {
-                return Err(fail(StatusCode::BAD_REQUEST, ErrorCode::Invalid, format!("{path} is not a SolidCraft design (.sc, .solidcraft)")));
+                return Err(fail(StatusCode::BAD_REQUEST, ErrorCode::Invalid, format!("{path} is not a SolidCraft design or drawing (.sc, .solidcraft, .scdwg)")));
             }
             if vault.absolute(&path).exists() {
                 return Err(fail(StatusCode::CONFLICT, ErrorCode::Conflict, format!("{path} exists already")));
@@ -376,9 +376,12 @@ fn apply(vault: &mut Vault, user: &User, action: Action) -> Reply<Done> {
         }
         Action::Release { path, revision, note } => {
             not_checked_out(vault, &path)?;
+            vault.take_link_updates();
             let release = vault.release_as(&path, &revision, &note)?;
             let version = vault.history(&path)?.into_iter().find(|v| v.number == release.version).map(version_info);
-            Ok(Done { version, release: Some(release_info(release)), ..Done::default() })
+            // Assemblies whose link fingerprints the revision's edit brought up to date.
+            let updated = vault.take_link_updates().into_iter().map(|u| u.path).collect();
+            Ok(Done { version, release: Some(release_info(release)), updated, ..Done::default() })
         }
         Action::Revise { path } => {
             vault.revise(&path)?;
@@ -391,13 +394,15 @@ fn apply(vault: &mut Vault, user: &User, action: Action) -> Reply<Done> {
         Action::Properties { path, name, properties, comment } => {
             not_checked_out(vault, &path)?;
             let values: Vec<(&str, Option<&str>)> = properties.iter().map(|(k, v)| (k.as_str(), v.as_deref())).collect();
+            vault.take_link_updates();
             vault.edit_properties(&path, name.as_deref(), &values)?;
+            let updated = vault.take_link_updates().into_iter().map(|u| u.path).collect();
             let version = match vault.check_in(&path, &comment) {
                 Ok(v) => Some(version_info(v)),
                 Err(vault::Error::Unchanged(_)) => None,
                 Err(e) => return Err(e.into()),
             };
-            Ok(Done { version, ..Done::default() })
+            Ok(Done { version, updated, ..Done::default() })
         }
         Action::CreateFolder { path } => {
             vault.create_folder(&path)?;

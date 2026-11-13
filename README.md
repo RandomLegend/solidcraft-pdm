@@ -33,9 +33,12 @@ optional [team server](#team-server).
   the revision, ready to save for the workshop or the printer.
 - **Properties.** Part number, description, project and more, edited right in the file, the
   same ones SolidCraft shows under *Design Properties*.
-- **Assemblies.** A bill of materials with quantities through sub-assemblies (also as CSV),
-  *Pack and go* into a zip that keeps the links, and a warning before releasing an assembly
-  with unreleased parts.
+- **Assemblies.** A bill of materials counted as SolidCraft counts it (every placement, through
+  sub-assemblies, with phantom, reference, purchased and inseparable parts and standard parts;
+  also as CSV), *Pack and go* into a zip that keeps the links, and a warning before releasing an
+  assembly with unreleased parts.
+- **Drawings.** SolidCraft's drawings (`.scdwg`) are versioned and released like designs, list
+  the designs they draw, and keep finding them when designs move.
 
 <img src="docs/images/search.png" alt="Fuzzy search through every folder" width="100%">
 

@@ -145,6 +145,8 @@ pub struct Vault {
     store: Store,
     /// Who new versions are by; `None`: the user running the program.
     author: Option<String>,
+    /// Designs whose link fingerprints the last edits brought up to date ([`Vault::take_link_updates`]).
+    link_updates: Vec<LinkUpdate>,
 }
 
 impl Vault {
@@ -171,7 +173,7 @@ impl Vault {
         // Readers (the GUI's background scan, the CLI) don't block a writer, and vice versa.
         db.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         migrate(&db)?;
-        Ok(Vault { store: Store::new(pdm.join("objects")), root, db, author: None })
+        Ok(Vault { store: Store::new(pdm.join("objects")), root, db, author: None, link_updates: Vec::new() })
     }
 
     /// Opens the vault containing `path` (itself or the nearest folder above with `.pdm`).
@@ -394,8 +396,10 @@ impl Vault {
         self.db.execute("DELETE FROM stat_cache WHERE path = ?1", [from])?;
 
         let mut report = MoveReport { to: to.to_owned(), updated: Vec::new(), failed: Vec::new() };
+        let mut rewritten = Vec::new();
         for (change, was_current) in plan.into_iter().zip(current) {
             let path = if change.design == from { to.to_owned() } else { change.design.clone() };
+            let before = fs::read(self.absolute(&path)).map(|b| hash(&b));
             match self.rewrite_links(&path, &change.paths) {
                 Ok(()) => {
                     let comment = if path == to {
@@ -412,12 +416,93 @@ impl Vault {
                     } else {
                         None
                     };
+                    if let Ok(before) = before {
+                        rewritten.push((path.clone(), before));
+                    }
                     report.updated.push(LinkUpdate { path, version });
                 }
                 Err(e) => report.failed.push((path, e.to_string())),
             }
         }
+        // The assemblies that link to a design whose links were rewritten: its bodies are the
+        // same, so they take its new fingerprint.
+        for (path, before) in rewritten {
+            for update in self.refresh_fingerprints(&path, &before, "its links were updated")? {
+                report.updated.retain(|u| u.path != update.path);
+                report.updated.push(update);
+            }
+        }
         Ok(report)
+    }
+
+    /// The designs whose link fingerprints the edits since the last call brought up to date
+    /// ([`Vault::edit_properties`], [`Vault::release_as`]).
+    pub fn take_link_updates(&mut self) -> Vec<LinkUpdate> {
+        std::mem::take(&mut self.link_updates)
+    }
+
+    /// After the PDM rewrote `path` (whose bytes hashed `old`) without changing its bodies (its
+    /// properties, its revision, its link paths): every design whose link to it recorded `old` as
+    /// the file's fingerprint (SolidCraft 0.41's `file_sha256`) records the new one, as
+    /// SolidCraft's Update Links would, finding the bodies unchanged. Otherwise SolidCraft would
+    /// show the link as changed. That changes those designs too, so the designs linking to them
+    /// follow in turn. A link that already recorded another fingerprint (a real change since)
+    /// is left to show as changed; designs checked out by someone are left alone. A design
+    /// without unsaved changes gets a version that keeps its state, as after a move.
+    fn refresh_fingerprints(&mut self, path: &str, old: &str, why: &str) -> Result<Vec<LinkUpdate>> {
+        let mut updates: Vec<LinkUpdate> = Vec::new();
+        let mut queue = vec![(path.to_owned(), old.to_owned())];
+        let mut done: HashSet<String> = HashSet::new();
+        while let Some((target, old)) = queue.pop() {
+            let Ok(bytes) = fs::read(self.absolute(&target)) else { continue };
+            let new = hash(&bytes);
+            if new == old || !done.insert(target.clone()) {
+                continue;
+            }
+            let target_abs = normalize(&self.absolute(&target));
+            let mut files = Vec::new();
+            find_designs(&self.root, &mut files)?;
+            files.sort();
+            for file in files {
+                let Some(design) = vault_path(&self.root, &file) else { continue };
+                if design == target || self.lock_of(&design)?.is_some() {
+                    continue;
+                }
+                let Ok(info) = scformat::read_file(&file) else { continue };
+                let dir = file.parent().unwrap_or(&self.root).to_path_buf();
+                let stale: Vec<&scformat::Link> = info
+                    .links
+                    .iter()
+                    .filter(|l| l.file_sha256.as_deref() == Some(old.as_str()) && normalize(&dir.join(&l.path)) == target_abs)
+                    .collect();
+                if stale.is_empty() {
+                    continue;
+                }
+                let was_current = self.is_current(&design)?;
+                let before = fs::read(&file)?;
+                let edited = scformat::edit_document(&before, |doc| {
+                    for link in &stale {
+                        link.set_file_sha256(doc, &new);
+                    }
+                })
+                .map_err(|e| Error::Corrupt(format!("{design}: {e}")))?;
+                if edited == before {
+                    continue;
+                }
+                let perms = fs::metadata(&file).ok().map(|m| m.permissions());
+                write_atomic(&file, &edited, perms.as_ref())?;
+                let version = if was_current {
+                    let comment = format!("Link to {target} brought up to date ({why})");
+                    Some(self.record_with(&design, &edited, &hash(&edited), &comment, true)?.number)
+                } else {
+                    None
+                };
+                updates.retain(|u| u.path != design);
+                updates.push(LinkUpdate { path: design.clone(), version });
+                queue.push((design, hash(&before)));
+            }
+        }
+        Ok(updates)
     }
 
     /// Moves a file into `folder` ("" for the top level), keeping its name and history, and
@@ -459,7 +544,7 @@ impl Vault {
                     relative_path(&new_dir, &new_target)
                 };
                 if new_path != link.path {
-                    paths.push((link.component, new_path));
+                    paths.push((link.clone(), new_path));
                 }
             }
             if !paths.is_empty() {
@@ -469,15 +554,13 @@ impl Vault {
         Ok(changes)
     }
 
-    /// Writes new link paths (by component id) into a design file.
-    fn rewrite_links(&self, path: &str, paths: &[(u64, String)]) -> Result<()> {
+    /// Writes new link paths into a design file (or new source paths into a drawing).
+    fn rewrite_links(&self, path: &str, paths: &[(scformat::Link, String)]) -> Result<()> {
         let file = self.absolute(path);
         let bytes = fs::read(&file)?;
         let edited = scformat::edit_document(&bytes, |doc| {
-            for (component, new_path) in paths {
-                if let Some(link) = doc.get_mut("links").and_then(|l| l.get_mut(component.to_string())) {
-                    link["path"] = serde_json::Value::String(new_path.clone());
-                }
+            for (link, new_path) in paths {
+                link.set_path(doc, new_path);
             }
         })
         .map_err(|e| Error::Corrupt(format!("{path}: {e}")))?;
@@ -879,19 +962,34 @@ pub const DESIGN_EXT: &str = "sc";
 /// all three stay in use.
 pub const DESIGN_EXTS: [&str; 3] = [DESIGN_EXT, "solidcraft", "solvecraft"];
 
-/// Whether `path` names a SolidCraft design (`.sc`, `.solidcraft` or `.solvecraft`, any case).
+/// The extension of SolidCraft's drawings (since 0.41): sheets that draw designs.
+pub const DRAWING_EXT: &str = "scdwg";
+
+/// Whether `path` names a SolidCraft file the vault keeps versions of: a design (`.sc`,
+/// `.solidcraft` or `.solvecraft`) or a drawing (`.scdwg`), any case. Drawings are kept, moved,
+/// released and shared like designs; [`is_drawing`] tells them apart.
 pub fn is_design(path: &Path) -> bool {
+    is_model(path) || is_drawing(path)
+}
+
+/// Whether `path` names a design proper (not a drawing).
+fn is_model(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| DESIGN_EXTS.iter().any(|d| e.eq_ignore_ascii_case(d)))
+}
+
+/// Whether `path` names a SolidCraft drawing (`.scdwg`, any case).
+pub fn is_drawing(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(DRAWING_EXT))
 }
 
 /// A new design's file name: as given when it has a design extension (`.solidcraft` to suit an
 /// older SolidCraft, say), else with `.sc`, as SolidCraft names new designs.
 pub fn new_design_name(name: &str) -> String {
-    if is_design(Path::new(name)) { name.to_owned() } else { format!("{name}.{DESIGN_EXT}") }
+    if is_model(Path::new(name)) { name.to_owned() } else { format!("{name}.{DESIGN_EXT}") }
 }
 
-/// A design's file name without its extension (`pi4-case` for `pi4-case.sc`); other names as
-/// they are.
+/// A design's file name without its extension (`pi4-case` for `pi4-case.sc`); other names
+/// (drawings among them, so a drawing never reads as the design it draws) as they are.
 pub fn design_stem(file_name: &str) -> &str {
     match file_name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && DESIGN_EXTS.iter().any(|d| ext.eq_ignore_ascii_case(d)) => stem,
@@ -949,10 +1047,10 @@ pub struct LinkUpdate {
     pub version: Option<u32>,
 }
 
-/// New link paths for one design, by component id.
+/// New link paths for one design (or drawing source paths), each with the link it replaces.
 struct LinkChange {
     design: String,
-    paths: Vec<(u64, String)>,
+    paths: Vec<(scformat::Link, String)>,
 }
 
 /// `target` relative to the folder `dir`, `/` separated, as SolidCraft stores links.

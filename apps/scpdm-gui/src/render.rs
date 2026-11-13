@@ -242,6 +242,10 @@ fn draw(cli: &Path, cache: &Path, hash: &str, shot: Shot, source: Source) -> Opt
         // Changed since it was asked for: the next scan asks again.
         return None;
     }
+    if scformat::kind_of(&bytes) == scformat::Kind::Drawing {
+        // SolidCraft's command line program draws designs only.
+        return None;
+    }
     let tmp = cache.join("tmp");
     let design = tmp.join(format!("{key}.solidcraft"));
     let picture = tmp.join(format!("{key}.png"));

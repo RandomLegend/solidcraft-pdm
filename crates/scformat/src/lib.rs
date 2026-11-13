@@ -10,6 +10,12 @@
 //!
 //! The format is detected from the contents (ZIP signature `50 4b 03 04`), never from the name.
 //!
+//! A **drawing** (`.scdwg`, SolidCraft 0.41) is read the same way and described by the same
+//! [`DesignInfo`] ([`Kind::Drawing`]): a container whose `container.json` says
+//! `"content": "drawing"` and holds `drawing.json`, or plain JSON with
+//! `"format": "solidcraft-drawing/N"`. Its properties are the design properties' rules (kept under
+//! `properties`), and the designs it draws (`sources`) are its [`Link`]s.
+//!
 //! This crate reads only what a PDM needs (and writes new, empty designs, [`new_design`]): the design properties (`metadata`), name, units,
 //! counts, components, links to other design files and the thumbnail. It never evaluates
 //! geometry and does not depend on SolidCraft's crates, so it keeps working across SolidCraft
@@ -72,6 +78,9 @@ pub struct Metadata {
     pub organization: Option<String>,
     pub description: Option<String>,
     pub license: Option<String>,
+    /// A component's bill of materials type (`bom_type`, part properties only), as stored: read it
+    /// with [`BomType::parse`].
+    pub bom_type: Option<String>,
     /// Every other key, as stored (other tools' data and keys from newer SolidCraft versions).
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
@@ -88,6 +97,7 @@ impl Metadata {
                 "organization" => &mut m.organization,
                 "description" => &mut m.description,
                 "license" => &mut m.license,
+                "bom_type" => &mut m.bom_type,
                 _ => {
                     m.extensions.insert(key, value);
                     continue;
@@ -101,9 +111,60 @@ impl Metadata {
     pub fn is_empty(&self) -> bool {
         *self == Metadata::default()
     }
+
+    /// The bill of materials type: normal when missing, or a word this crate doesn't know (as
+    /// SolidCraft reads a newer build's type).
+    pub fn bom_type(&self) -> BomType {
+        self.bom_type.as_deref().and_then(BomType::parse).unwrap_or_default()
+    }
 }
 
-/// A component of the design (`parent` 0 is the root).
+fn metadata_map<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Metadata, D::Error> {
+    // Anything but an object reads as no properties, as SolidCraft reads it.
+    let value = serde_json::Value::deserialize(d)?;
+    let map = match value {
+        serde_json::Value::Object(m) => m.into_iter().collect(),
+        _ => BTreeMap::new(),
+    };
+    Ok(Metadata::from_map(map))
+}
+
+/// How a component counts in a bill of materials (SolidCraft 0.41's `bom_type` part property).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BomType {
+    /// A row of its own; every placement adds to its quantity.
+    #[default]
+    Normal,
+    /// No row of its own: what it holds counts as if placed in its parent.
+    Phantom,
+    /// Shown in the model, counted nowhere, and nothing inside it is counted either.
+    Reference,
+    /// Bought: one row, nothing inside it counted.
+    Purchased,
+    /// Made as one item (a welded frame): one row; of what it holds only purchased parts count.
+    Inseparable,
+}
+
+impl BomType {
+    pub const ALL: [BomType; 5] = [BomType::Normal, BomType::Phantom, BomType::Reference, BomType::Purchased, BomType::Inseparable];
+
+    /// The word the design file uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BomType::Normal => "normal",
+            BomType::Phantom => "phantom",
+            BomType::Reference => "reference",
+            BomType::Purchased => "purchased",
+            BomType::Inseparable => "inseparable",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<BomType> {
+        BomType::ALL.into_iter().find(|t| t.as_str() == word)
+    }
+}
+
+/// A component of the design (`parent` 0 is the root): a definition, placed by occurrences.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Component {
     pub id: u64,
@@ -111,19 +172,124 @@ pub struct Component {
     pub name: String,
     #[serde(default)]
     pub parent: u64,
+    /// The definition's part properties (part number, description, revision, `bom_type`), shared
+    /// by every occurrence. Insert Design seeds them from the linked design's properties.
+    #[serde(default, deserialize_with = "metadata_map")]
+    pub metadata: Metadata,
 }
 
-/// A component linked to another design file.
+/// A placement of a component (`parent`: the component it sits in, 0 the root).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Occurrence {
+    #[serde(default)]
+    pub id: u64,
+    pub component: u64,
+    #[serde(default)]
+    pub parent: u64,
+}
+
+/// A component that is a standard part (a fastener, pin, bearing), rebuilt from a catalogue.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct StandardPart {
+    #[serde(default)]
+    pub family: String,
+    #[serde(default)]
+    pub size: String,
+    #[serde(default)]
+    pub length: Option<f64>,
+}
+
+impl StandardPart {
+    /// As a bill of materials names it: `ISO 4762 M3 × 12`.
+    pub fn label(&self) -> String {
+        let mut out = format!("{} {}", self.family.trim(), self.size.trim()).trim().to_owned();
+        if let Some(l) = self.length.filter(|l| l.is_finite() && *l > 0.0) {
+            out.push_str(&format!(" × {}", l));
+        }
+        out
+    }
+}
+
+/// A component linked to another design file, or a design a drawing draws.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Link {
+    /// The linked component (0 for a drawing's source).
     pub component: u64,
-    /// Relative to the linking design's folder, `/` separated (as SolidCraft stores it).
+    /// Relative to the linking file's folder, `/` separated (as SolidCraft stores it).
     pub path: String,
+    /// A drawing's source: its id, as stored.
+    pub source: Option<String>,
+    /// The SHA-256 of the linked file's bytes as the assembly last read them (SolidCraft 0.41,
+    /// format 46): a file that no longer has it shows as changed, for Update Links.
+    pub file_sha256: Option<String>,
+}
+
+impl Link {
+    /// Writes a new `path` for this link into a design's or drawing's document (as
+    /// [`edit_document`] hands it over).
+    pub fn set_path(&self, doc: &mut serde_json::Value, path: &str) {
+        let entry = match &self.source {
+            Some(id) => doc
+                .get_mut("sources")
+                .and_then(serde_json::Value::as_array_mut)
+                .and_then(|sources| sources.iter_mut().find(|s| source_id(&s["id"]).as_deref() == Some(id))),
+            None => doc.get_mut("links").and_then(|l| l.get_mut(self.component.to_string())),
+        };
+        if let Some(entry) = entry.filter(|e| e.is_object()) {
+            entry["path"] = serde_json::Value::String(path.to_owned());
+        }
+    }
+
+    /// Writes the fingerprint of the linked file (lower-case hex SHA-256) into a design's
+    /// document, as SolidCraft's Update Links does when the file's bodies are unchanged. A link
+    /// that keeps none (saved before format 46) is left without.
+    pub fn set_file_sha256(&self, doc: &mut serde_json::Value, digest: &str) {
+        if self.source.is_some() {
+            return;
+        }
+        if let Some(link) = doc.get_mut("links").and_then(|l| l.get_mut(self.component.to_string())) {
+            if link.get("file_sha256").is_some_and(serde_json::Value::is_string) {
+                link["file_sha256"] = serde_json::Value::String(digest.to_owned());
+            }
+        }
+    }
+}
+
+fn source_id(id: &serde_json::Value) -> Option<String> {
+    match id {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// What a SolidCraft file holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kind {
+    #[default]
+    Design,
+    /// A drawing (`.scdwg`): sheets that draw designs.
+    Drawing,
+}
+
+/// The format tag of drawings: `solidcraft-drawing/N`.
+pub const DRAWING_FORMAT_PREFIX: &str = "solidcraft-drawing/";
+const DRAWING_PART: &str = "drawing.json";
+
+/// The key a document keeps its properties under: `metadata` in a design, `properties` in a
+/// drawing.
+pub fn properties_key(doc: &serde_json::Value) -> &'static str {
+    if is_drawing_document(doc) { "properties" } else { "metadata" }
+}
+
+fn is_drawing_document(doc: &serde_json::Value) -> bool {
+    doc.get("format").and_then(serde_json::Value::as_str).is_some_and(|f| f.starts_with(DRAWING_FORMAT_PREFIX))
 }
 
 /// What the PDM knows about one design file.
 #[derive(Clone, Debug)]
 pub struct DesignInfo {
+    pub kind: Kind,
     pub encoding: Encoding,
     /// `solidcraft/N`; `None` for designs older than the format string.
     pub format: Option<String>,
@@ -133,9 +299,16 @@ pub struct DesignInfo {
     pub feature_count: usize,
     pub param_count: usize,
     pub components: Vec<Component>,
+    /// Where components are placed. A design saved before occurrences existed places each
+    /// component once, in its parent: those are filled in here as SolidCraft does on upgrade.
+    pub occurrences: Vec<Occurrence>,
+    /// Components that are standard parts, by component id.
+    pub standard_parts: BTreeMap<u64, StandardPart>,
     pub links: Vec<Link>,
     /// Entries under `blobs/` (containers only).
     pub blob_count: usize,
+    /// A drawing's sheets.
+    pub sheet_count: usize,
     /// Whether the container carries SolidCraft's evaluated model cache.
     pub has_model_cache: bool,
     /// The portable 240×150 PNG, when the container carries one.
@@ -143,9 +316,10 @@ pub struct DesignInfo {
 }
 
 impl DesignInfo {
-    /// The `N` of `solidcraft/N`.
+    /// The `N` of `solidcraft/N` (`solidcraft-drawing/N` for a drawing).
     pub fn format_version(&self) -> Option<u32> {
-        self.format.as_deref()?.strip_prefix("solidcraft/")?.parse().ok()
+        let format = self.format.as_deref()?;
+        format.strip_prefix("solidcraft/").or_else(|| format.strip_prefix(DRAWING_FORMAT_PREFIX))?.parse().ok()
     }
 }
 
@@ -189,8 +363,42 @@ pub fn read<R: Read + Seek>(mut source: R) -> Result<DesignInfo> {
         read_container(source)
     } else {
         let bytes = read_bounded(source, MAX_PART_BYTES, "design")?;
+        #[derive(Deserialize)]
+        struct Probe {
+            #[serde(default)]
+            format: Option<serde_json::Value>,
+        }
+        let probe: Probe = serde_json::from_slice(&bytes)?;
+        if probe.format.as_ref().and_then(serde_json::Value::as_str).is_some_and(|f| f.starts_with(DRAWING_FORMAT_PREFIX)) {
+            let drawing: RawDrawing = serde_json::from_slice(&bytes)?;
+            return Ok(drawing.into_info(Encoding::Json));
+        }
         let doc: RawDocument = serde_json::from_slice(&bytes)?;
         Ok(doc.into_info(Encoding::Json))
+    }
+}
+
+/// Whether `bytes` hold a design or a drawing, cheaply (the container's `container.json`, or the
+/// plain JSON's `format`); anything unreadable counts as a design, for the full read to refuse.
+pub fn kind_of(bytes: &[u8]) -> Kind {
+    if bytes.starts_with(&ZIP_SIGNATURE) {
+        let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else { return Kind::Design };
+        let content = zip
+            .by_name("container.json")
+            .ok()
+            .and_then(|e| read_bounded(e, 4096, "container.json").ok())
+            .and_then(|b| serde_json::from_slice::<RawContainer>(&b).ok())
+            .and_then(|c| c.content);
+        return if content.as_deref() == Some("drawing") { Kind::Drawing } else { Kind::Design };
+    }
+    #[derive(Deserialize)]
+    struct Probe {
+        #[serde(default)]
+        format: Option<serde_json::Value>,
+    }
+    match serde_json::from_slice::<Probe>(bytes) {
+        Ok(Probe { format: Some(serde_json::Value::String(f)) }) if f.starts_with(DRAWING_FORMAT_PREFIX) => Kind::Drawing,
+        _ => Kind::Design,
     }
 }
 
@@ -198,9 +406,10 @@ pub fn read<R: Read + Seek>(mut source: R) -> Result<DesignInfo> {
 pub fn read_document(bytes: &[u8]) -> Result<serde_json::Value> {
     if bytes.starts_with(&ZIP_SIGNATURE) {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-        return match zip.by_name("document.json") {
-            Ok(entry) => Ok(serde_json::from_slice(&read_bounded(entry, MAX_PART_BYTES, "document.json")?)?),
-            Err(zip::result::ZipError::FileNotFound) => Err(Error::MissingPart("document.json")),
+        let part = document_part(&zip);
+        return match zip.by_name(part) {
+            Ok(entry) => Ok(serde_json::from_slice(&read_bounded(entry, MAX_PART_BYTES, part)?)?),
+            Err(zip::result::ZipError::FileNotFound) => Err(Error::MissingPart(part)),
             Err(e) => Err(e.into()),
         };
     }
@@ -244,9 +453,10 @@ pub fn edit_document(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) ->
 
 fn edit_container(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Result<Vec<u8>> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let mut doc: serde_json::Value = match zip.by_name("document.json") {
-        Ok(entry) => serde_json::from_slice(&read_bounded(entry, MAX_PART_BYTES, "document.json")?)?,
-        Err(zip::result::ZipError::FileNotFound) => return Err(Error::MissingPart("document.json")),
+    let part = document_part(&zip);
+    let mut doc: serde_json::Value = match zip.by_name(part) {
+        Ok(entry) => serde_json::from_slice(&read_bounded(entry, MAX_PART_BYTES, part)?)?,
+        Err(zip::result::ZipError::FileNotFound) => return Err(Error::MissingPart(part)),
         Err(e) => return Err(e.into()),
     };
     let before = doc.clone();
@@ -259,20 +469,26 @@ fn edit_container(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Re
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::with_capacity(bytes.len())));
     for i in 0..zip.len() {
         let entry = zip.by_index_raw(i)?;
-        if entry.name() == "document.json" {
+        if entry.name() == part {
             // As SolidCraft writes it: Deflate level 1.
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated)
                 .compression_level(Some(1))
                 .last_modified_time(entry.last_modified().unwrap_or_default());
             drop(entry);
-            out.start_file("document.json", options)?;
+            out.start_file(part, options)?;
             std::io::Write::write_all(&mut out, &document)?;
         } else {
             out.raw_copy_file(entry)?;
         }
     }
     Ok(out.finish()?.into_inner())
+}
+
+/// The part a container keeps its document in: `drawing.json` in a drawing, else `document.json`.
+fn document_part<R: Read + Seek>(zip: &zip::ZipArchive<R>) -> &'static str {
+    let names: Vec<&str> = zip.file_names().collect();
+    if names.contains(&DRAWING_PART) && !names.contains(&"document.json") { DRAWING_PART } else { "document.json" }
 }
 
 fn read_container<R: Read + Seek>(source: R) -> Result<DesignInfo> {
@@ -285,6 +501,20 @@ fn read_container<R: Read + Seek>(source: R) -> Result<DesignInfo> {
     };
     if !CONTAINER_FORMAT_PREFIX.iter().any(|p| container.format.starts_with(p)) {
         return Err(Error::UnsupportedContainer(container.format));
+    }
+    match container.content.as_deref() {
+        None => {}
+        Some("drawing") => {
+            let drawing: RawDrawing = match zip.by_name(DRAWING_PART) {
+                Ok(entry) => serde_json::from_slice(&read_bounded(entry, MAX_PART_BYTES, DRAWING_PART)?)?,
+                Err(zip::result::ZipError::FileNotFound) => return Err(Error::MissingPart(DRAWING_PART)),
+                Err(e) => return Err(e.into()),
+            };
+            return Ok(drawing.into_info(Encoding::Container));
+        }
+        // A later kind of content that still holds a design reads as one, as in SolidCraft.
+        Some(_) if zip.file_names().any(|n| n == "document.json") => {}
+        Some(other) => return Err(Error::UnsupportedContainer(format!("{} holding {other}", container.format))),
     }
 
     let doc: RawDocument = match zip.by_name("document.json") {
@@ -314,6 +544,57 @@ fn read_container<R: Read + Seek>(source: R) -> Result<DesignInfo> {
 #[derive(Deserialize)]
 struct RawContainer {
     format: String,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// The subset of SolidCraft's `Drawing` the PDM reads.
+#[derive(Deserialize)]
+struct RawDrawing {
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    properties: Option<serde_json::Value>,
+    #[serde(default)]
+    sources: Vec<serde_json::Value>,
+    #[serde(default)]
+    sheets: Vec<IgnoredAny>,
+}
+
+impl RawDrawing {
+    fn into_info(self, encoding: Encoding) -> DesignInfo {
+        let properties = match self.properties {
+            Some(serde_json::Value::Object(m)) => m.into_iter().collect(),
+            _ => BTreeMap::new(),
+        };
+        let links = self
+            .sources
+            .iter()
+            .filter_map(|s| {
+                Some(Link { component: 0, path: s.get("path")?.as_str()?.to_owned(), source: Some(source_id(s.get("id")?)?), file_sha256: None })
+            })
+            .collect();
+        DesignInfo {
+            kind: Kind::Drawing,
+            encoding,
+            format: self.format,
+            name: self.name,
+            units: None,
+            metadata: Metadata::from_map(properties),
+            feature_count: 0,
+            param_count: 0,
+            components: Vec::new(),
+            occurrences: Vec::new(),
+            standard_parts: BTreeMap::new(),
+            links,
+            blob_count: 0,
+            sheet_count: self.sheets.len(),
+            has_model_cache: false,
+            thumbnail_png: None,
+        }
+    }
 }
 
 /// The subset of SolidCraft's `Document` the PDM reads. Everything else is skipped unparsed.
@@ -333,6 +614,11 @@ struct RawDocument {
     params: Vec<IgnoredAny>,
     #[serde(default)]
     components: Vec<Component>,
+    #[serde(default)]
+    occurrences: Option<Vec<Occurrence>>,
+    /// Component id (as a JSON object key) → standard part.
+    #[serde(default)]
+    parts: BTreeMap<String, StandardPart>,
     /// Component id (as a JSON object key) → link.
     #[serde(default)]
     links: BTreeMap<String, RawLink>,
@@ -341,6 +627,8 @@ struct RawDocument {
 #[derive(Deserialize)]
 struct RawLink {
     path: String,
+    #[serde(default)]
+    file_sha256: Option<String>,
 }
 
 impl RawDocument {
@@ -348,9 +636,14 @@ impl RawDocument {
         let links = self
             .links
             .into_iter()
-            .filter_map(|(id, link)| Some(Link { component: id.parse().ok()?, path: link.path }))
+            .filter_map(|(id, link)| Some(Link { component: id.parse().ok()?, path: link.path, source: None, file_sha256: link.file_sha256 }))
             .collect();
+        let occurrences = self.occurrences.unwrap_or_else(|| {
+            self.components.iter().map(|c| Occurrence { id: 0, component: c.id, parent: c.parent }).collect()
+        });
+        let standard_parts = self.parts.into_iter().filter_map(|(id, p)| Some((id.parse().ok()?, p))).collect();
         DesignInfo {
+            kind: Kind::Design,
             encoding,
             format: self.format,
             name: self.name,
@@ -359,8 +652,11 @@ impl RawDocument {
             feature_count: self.features.len(),
             param_count: self.params.len(),
             components: self.components,
+            occurrences,
+            standard_parts,
             links,
             blob_count: 0,
+            sheet_count: 0,
             has_model_cache: false,
             thumbnail_png: None,
         }

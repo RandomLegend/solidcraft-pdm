@@ -306,7 +306,9 @@ impl Vault {
         Ok(())
     }
 
-    /// Changes the design's name and design properties in its file (`None` or empty text
+    /// Changes the design's name and design properties in its file (a drawing's `properties`).
+    /// Assemblies whose links recorded the file as it was take its new fingerprint
+    /// ([`Vault::take_link_updates`] names them). (`None` or empty text
     /// removes a property). Not checked in: the file then has changes like any edit.
     pub fn edit_properties(&mut self, path: &str, name: Option<&str>, properties: &[(&str, Option<&str>)]) -> Result<()> {
         for (key, value) in properties {
@@ -323,8 +325,9 @@ impl Vault {
             if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
                 doc["name"] = name.into();
             }
+            let kept_under = scformat::properties_key(doc);
             let Some(object) = doc.as_object_mut() else { return };
-            let metadata = object.entry("metadata").or_insert_with(|| serde_json::json!({}));
+            let metadata = object.entry(kept_under).or_insert_with(|| serde_json::json!({}));
             if let Some(metadata) = metadata.as_object_mut() {
                 for (key, value) in properties {
                     match value.map(str::trim).filter(|v| !v.is_empty()) {
@@ -338,14 +341,17 @@ impl Vault {
                 }
             }
             // A design without properties has no `metadata` at all, as SolidCraft saves it.
-            if object.get("metadata").and_then(|m| m.as_object()).is_some_and(|m| m.is_empty()) {
-                object.shift_remove("metadata");
+            if object.get(kept_under).and_then(|m| m.as_object()).is_some_and(|m| m.is_empty()) {
+                object.shift_remove(kept_under);
             }
         })
         .map_err(|e| Error::Design(format!("{path}: {e}")))?;
         if edited != bytes {
             let perms = fs::metadata(&file).ok().map(|m| m.permissions());
             write_atomic(&file, &edited, perms.as_ref())?;
+            // Only its properties changed: assemblies linking to it take its new fingerprint.
+            let updates = self.refresh_fingerprints(path, &crate::hash(&bytes), "only its properties changed")?;
+            self.link_updates.extend(updates);
         }
         Ok(())
     }

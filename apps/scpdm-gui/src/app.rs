@@ -617,6 +617,10 @@ impl App {
 
     /// Makes the production files of a release on a worker thread (after the one under way).
     fn make_release_files(&mut self, ctx: &egui::Context, path: &str, version: u32, revision: &str) {
+        // SolidCraft's command line program exports designs only, not drawings (0.41).
+        if vault::is_drawing(std::path::Path::new(path)) {
+            return;
+        }
         let Some(backend) = &self.backend else { return };
         let history = if self.selected.as_deref() == Some(path) { self.history.clone() } else { backend.history(path).unwrap_or_default() };
         let Some(v) = history.iter().find(|v| v.number == version) else {
@@ -893,30 +897,26 @@ impl App {
             .collect()
     }
 
-    /// The bill of materials' rows as shown and saved: quantity, part number, name,
-    /// description, revision, state, file.
-    fn bom_rows(&self, path: &str) -> Vec<(crate::bom::Line, [String; 5])> {
-        crate::bom::lines(path, |p| self.links_of(p))
+    /// The bill of materials' rows with each one's state, as shown and saved.
+    fn bom_rows(&self, path: &str) -> Vec<(crate::bom::Line, String)> {
+        let design_of = |p: &str| self.entry(p).filter(|e| e.status != Status::Missing).and_then(|e| self.info(e));
+        crate::bom::lines(path, design_of, resolve_link)
             .into_iter()
-            .filter(|l| l.path != path)
+            .filter(|l| l.definition != crate::bom::Definition::Design(path.to_owned()))
             .map(|line| {
-                let entry = self.entry(&line.path);
-                let info = entry.and_then(|e| self.info(e));
-                let stem = line.path.rsplit_once('/').map_or(line.path.as_str(), |(_, n)| n);
-                let stem = stem.rsplit_once('.').map_or(stem, |(s, _)| s);
-                let part_number = info.and_then(|i| i.metadata.part_number.clone()).unwrap_or_default();
-                let name = info.and_then(|i| i.name.clone()).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| stem.to_owned());
-                let description = info.and_then(|i| i.metadata.description.clone()).unwrap_or_default();
-                let revision = info.and_then(|i| i.metadata.revision.clone()).unwrap_or_default();
-                let state = match entry.map(|e| (e.state, e.status)) {
-                    _ if line.missing => "Missing".to_owned(),
-                    Some((Some(vault::State::Released), Status::Current)) => "Released".to_owned(),
-                    Some((Some(vault::State::Released), _)) => "Released · changed".to_owned(),
-                    Some((Some(vault::State::Obsolete), _)) => "Obsolete".to_owned(),
-                    Some((_, Status::Untracked)) => "Not in the vault".to_owned(),
-                    _ => "In progress".to_owned(),
+                let state = match &line.definition {
+                    crate::bom::Definition::Design(_) => match self.entry(&line.path).map(|e| (e.state, e.status)) {
+                        _ if line.missing => "Missing",
+                        Some((Some(vault::State::Released), Status::Current)) => "Released",
+                        Some((Some(vault::State::Released), _)) => "Released · changed",
+                        Some((Some(vault::State::Obsolete), _)) => "Obsolete",
+                        Some((_, Status::Untracked)) => "Not in the vault",
+                        _ => "In progress",
+                    },
+                    crate::bom::Definition::Standard(_) => "Standard part",
+                    crate::bom::Definition::Component(..) => "In the design",
                 };
-                (line, [part_number, name, description, revision, state])
+                (line, state.to_owned())
             })
             .collect()
     }
@@ -1435,9 +1435,11 @@ impl App {
                 let rows: Vec<Vec<String>> = self
                     .bom_rows(&path)
                     .into_iter()
-                    .map(|(line, [part_number, name, description, revision, state])| vec![line.quantity.to_string(), part_number, name, description, revision, state, line.path])
+                    .map(|(l, state)| {
+                        vec![l.quantity.to_string(), l.part_number, l.name, l.description, l.revision, l.bom_type.as_str().to_owned(), state, l.path]
+                    })
                     .collect();
-                let text = crate::bom::csv(&["Quantity", "Part number", "Name", "Description", "Revision", "State", "File"], &rows);
+                let text = crate::bom::csv(&["Quantity", "Part number", "Name", "Description", "Revision", "Type", "State", "File"], &rows);
                 let stem = path.rsplit_once('/').map_or(path.as_str(), |(_, n)| n);
                 let stem = stem.rsplit_once('.').map_or(stem, |(s, _)| s);
                 let Some(out) = rfd::FileDialog::new().set_file_name(format!("{stem}-bom.csv")).add_filter("CSV", &["csv"]).save_file() else { return };
@@ -1453,6 +1455,17 @@ impl App {
                 let Some(out) = rfd::FileDialog::new().set_file_name(format!("{stem}.zip")).add_filter("Zip", &["zip"]).save_file() else { return };
                 let mut designs = vec![path.clone()];
                 designs.extend(crate::bom::used(&path, |p| self.links_of(p)));
+                // And the drawings of what is packed: those that draw nothing else.
+                let mut drawings: Vec<String> = Vec::new();
+                for design in &designs {
+                    for drawing in self.used_in(design).into_iter().filter(|p| vault::is_drawing(std::path::Path::new(p))) {
+                        let draws_only_packed = self.links_of(&drawing).is_some_and(|sources| sources.iter().all(|s| designs.contains(s)));
+                        if draws_only_packed && !drawings.contains(&drawing) {
+                            drawings.push(drawing);
+                        }
+                    }
+                }
+                designs.extend(drawings);
                 match crate::bom::pack(&backend.root(), &stem, &designs, &out) {
                     Ok(missing) if missing.is_empty() => self.info_msg(format!("Packed {} designs into {}", designs.len(), out.display())),
                     Ok(missing) => self.error(format!("Packed into {}, without {} missing: {}", out.display(), missing.len(), missing.join(", "))),
@@ -2893,7 +2906,7 @@ impl App {
                 properties(ui, &entry, info.as_ref(), latest.as_ref());
             });
             if let Some((lifecycle, _)) = &self.lifecycle {
-                if !lifecycle.releases.is_empty() {
+                if !lifecycle.releases.is_empty() && !vault::is_drawing(std::path::Path::new(&entry.path)) {
                     let exporting = self.exporting.as_ref().is_some_and(|(p, _)| *p == entry.path)
                         || self.export_queue.iter().any(|r| r.path == entry.path);
                     release_files_ui(ui, &entry.path, &lifecycle.releases, exporting, &self.settings.file_apps, actions);
@@ -2902,20 +2915,41 @@ impl App {
 
             if let Some(info) = &info {
                 if !info.links.is_empty() {
-                    egui::CollapsingHeader::new(RichText::new(format!("Uses ({})", info.links.len())).font(theme::semibold(size::HEADING)))
+                    let drawing = info.kind == scformat::Kind::Drawing;
+                    let title = if drawing { "Draws" } else { "Uses" };
+                    egui::CollapsingHeader::new(RichText::new(format!("{title} ({})", info.links.len())).font(theme::semibold(size::HEADING)))
+                        .id_salt("uses")
                         .default_open(true)
                         .show(ui, |ui| {
-                            for link in &info.links {
+                            for (i, link) in info.links.iter().enumerate() {
                                 let target = resolve_link(&entry.path, &link.path);
-                                let component =
-                                    info.components.iter().find(|c| c.id == link.component).map_or("?", |c| c.name.as_str());
-                                self.link_row(ui, component, &link.path, target, actions);
+                                let label = if drawing {
+                                    format!("Source {}", i + 1)
+                                } else {
+                                    info.components.iter().find(|c| c.id == link.component).map_or("?", |c| c.name.as_str()).to_owned()
+                                };
+                                self.link_row(ui, &label, &link.path, target, actions);
                             }
                         });
+                }
+                if !info.occurrences.is_empty() {
                     self.bom_ui(ui, &entry.path, actions);
                 }
             }
-            let used_in = self.used_in(&entry.path);
+            let (drawings, used_in): (Vec<String>, Vec<String>) =
+                self.used_in(&entry.path).into_iter().partition(|p| vault::is_drawing(std::path::Path::new(p)));
+            if !drawings.is_empty() {
+                egui::CollapsingHeader::new(RichText::new(format!("Drawings ({})", drawings.len())).font(theme::semibold(size::HEADING)))
+                    .id_salt("drawings")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for path in &drawings {
+                            if ui.link(path).on_hover_text("A drawing of this design").clicked() {
+                                actions.push(Action::Select(path.clone()));
+                            }
+                        }
+                    });
+            }
             if !used_in.is_empty() {
                 egui::CollapsingHeader::new(RichText::new(format!("Used in ({})", used_in.len())).font(theme::semibold(size::HEADING)))
                     .default_open(true)
@@ -3012,28 +3046,40 @@ impl App {
     /// An assembly's bill of materials: every design it uses, with the quantity in all.
     fn bom_ui(&self, ui: &mut egui::Ui, path: &str, actions: &mut Vec<Action>) {
         let rows = self.bom_rows(path);
-        let pieces: u32 = rows.iter().filter(|(l, _)| !l.assembly).map(|(l, _)| l.quantity).sum();
+        let pieces: u32 = rows.iter().filter(|(l, _)| !l.assembly || l.bom_type != scformat::BomType::Normal).map(|(l, _)| l.quantity).sum();
         let t = theme::tokens(ui);
         egui::CollapsingHeader::new(RichText::new("Bill of materials").font(theme::semibold(size::HEADING)))
             .id_salt("bom")
             .default_open(false)
             .show(ui, |ui| {
-                ui.label(RichText::new(format!("{} designs, {pieces} parts in all (through sub-assemblies)", rows.len())).color(t.text_dim));
+                let rows_word = if rows.len() == 1 { "row" } else { "rows" };
+                ui.label(RichText::new(format!("{} {rows_word}, {pieces} parts in all (through sub-assemblies)", rows.len())).color(t.text_dim));
                 egui::Grid::new("bom-table").num_columns(4).spacing([12.0, 4.0]).striped(true).show(ui, |ui| {
                     for title in ["Qty", "Part number", "Name", "Rev"] {
                         ui.label(RichText::new(title).small().color(t.label));
                     }
                     ui.end_row();
-                    for (line, [part_number, name, _, revision, state]) in &rows {
+                    for (line, state) in &rows {
                         ui.label(RichText::new(line.quantity.to_string()).strong());
-                        ui.label(part_number);
-                        let shown = if line.assembly { format!("{name} (assembly)") } else { name.clone() };
-                        let text = if line.missing { RichText::new(format!("{name} (missing)")).color(t.error) } else { RichText::new(shown) };
-                        let hint = format!("{}\n{state}{}", line.path, if line.assembly { " · an assembly: its parts are counted too" } else { "" });
+                        ui.label(&line.part_number);
+                        let name = &line.name;
+                        let kind = match line.bom_type {
+                            scformat::BomType::Purchased => " (purchased)",
+                            scformat::BomType::Inseparable => " (inseparable)",
+                            _ if line.assembly => " (assembly)",
+                            _ => "",
+                        };
+                        let text = if line.missing { RichText::new(format!("{name} (missing)")).color(t.error) } else { RichText::new(format!("{name}{kind}")) };
+                        let counted = match line.bom_type {
+                            scformat::BomType::Inseparable if line.assembly => " · its purchased parts are counted too",
+                            scformat::BomType::Normal if line.assembly => " · an assembly: its parts are counted too",
+                            _ => "",
+                        };
+                        let hint = format!("{}\n{state}{counted}", line.path);
                         if ui.link(text).on_hover_text(hint).clicked() && !line.missing {
                             actions.push(Action::Select(line.path.clone()));
                         }
-                        ui.label(revision);
+                        ui.label(&line.revision);
                         ui.end_row();
                     }
                 });
@@ -3041,7 +3087,7 @@ impl App {
                     if ui.button("Save as CSV…").on_hover_text("For a spreadsheet: quantity, part number, name, description, revision, state, file").clicked() {
                         actions.push(Action::SaveBom(path.to_owned()));
                     }
-                    if ui.button("Pack and go…").on_hover_text("A zip of this assembly and every design it uses, in their folders, so the links work where it is unpacked").clicked() {
+                    if ui.button("Pack and go…").on_hover_text("A zip of this assembly, every design it links to and the drawings of them, in their folders, so the links work where it is unpacked").clicked() {
                         actions.push(Action::PackAndGo(path.to_owned()));
                     }
                 });
@@ -3818,10 +3864,15 @@ fn properties(ui: &mut egui::Ui, entry: &Entry, info: Option<&scformat::DesignIn
                 row("Author", m.author.clone());
                 row("Organization", m.organization.clone());
                 row("License", m.license.clone());
-                row("Units", i.units.clone());
-                row("Features", Some(i.feature_count.to_string()));
-                row("Parameters", Some(i.param_count.to_string()));
-                row("Components", (!i.components.is_empty()).then(|| i.components.len().to_string()));
+                if i.kind == scformat::Kind::Drawing {
+                    row("Kind", Some("Drawing".into()));
+                    row("Sheets", Some(i.sheet_count.to_string()));
+                } else {
+                    row("Units", i.units.clone());
+                    row("Features", Some(i.feature_count.to_string()));
+                    row("Parameters", Some(i.param_count.to_string()));
+                    row("Components", (!i.components.is_empty()).then(|| i.components.len().to_string()));
+                }
                 row(
                     "Stored as",
                     Some(match i.encoding {

@@ -596,3 +596,176 @@ fn releases_keep_their_production_files() {
     vault.purge_one(id).unwrap();
     assert!(vault.has_object(&step.hash), "younger than a day: kept for now");
 }
+
+/// A SolidCraft 0.41 drawing (plain JSON) drawing the given designs.
+fn drawing(sources: &[(&str, &str)]) -> String {
+    let sources: Vec<String> = sources.iter().map(|(id, p)| format!(r#"{{"id": "{id}", "path": "{p}"}}"#)).collect();
+    format!(
+        r#"{{
+  "format": "solidcraft-drawing/1",
+  "name": "Box drawing",
+  "sources": [{}],
+  "properties": {{"part_number": "DWG-1"}},
+  "language": "en-GB",
+  "sheets": [{{"id": "0sheet0000000", "documents": {{"source": "0lid000000000", "component": 0}}}}]
+}}
+"#,
+        sources.join(", ")
+    )
+}
+
+fn sources_of(dir: &Path, path: &str) -> Vec<String> {
+    scformat::read_file(dir.join(path)).unwrap().links.into_iter().map(|l| l.path).collect()
+}
+
+fn vault_with_drawing() -> (tempfile::TempDir, Vault) {
+    let (dir, mut vault) = linked_vault();
+    fs::create_dir_all(dir.path().join("drawings")).unwrap();
+    fs::write(dir.path().join("drawings/box.scdwg"), drawing(&[("0lid000000000", "../parts/lid.solidcraft"), ("0asm000000000", "../asm/box.solidcraft")])).unwrap();
+    vault.check_in("drawings/box.scdwg", "v1").unwrap();
+    (dir, vault)
+}
+
+#[test]
+fn drawings_are_kept_like_designs() {
+    let (_dir, mut vault) = vault_with_drawing();
+    assert!(vault::is_design(Path::new("a/b.SCDWG")) && vault::is_drawing(Path::new("b.scdwg")));
+    assert!(!vault::is_drawing(Path::new("b.sc")));
+    assert_eq!(vault::new_design_name("b.scdwg"), "b.scdwg.sc", "a new design is never a drawing");
+    assert_eq!(vault::design_stem("b.scdwg"), "b.scdwg");
+    let entry = vault.scan().unwrap().into_iter().find(|e| e.path == "drawings/box.scdwg").unwrap();
+    assert_eq!(entry.status, Status::Current);
+    assert_eq!(vault.history("drawings/box.scdwg").unwrap().len(), 1);
+}
+
+#[test]
+fn moving_a_design_updates_the_drawings_that_draw_it_and_a_moved_drawing_keeps_its_sources() {
+    let (dir, mut vault) = vault_with_drawing();
+    let report = vault.rename("parts/lid.solidcraft", "parts/old/lid.solidcraft").unwrap();
+    let mut updated: Vec<&str> = report.updated.iter().map(|u| u.path.as_str()).collect();
+    updated.sort();
+    assert_eq!(updated, ["asm/box.solidcraft", "drawings/box.scdwg"]);
+    assert_eq!(sources_of(dir.path(), "drawings/box.scdwg"), ["../parts/old/lid.solidcraft", "../asm/box.solidcraft"]);
+    assert_eq!(vault.history("drawings/box.scdwg").unwrap().len(), 2);
+
+    let report = vault.move_to_folder("drawings/box.scdwg", "").unwrap();
+    assert_eq!(report.updated.len(), 1);
+    assert_eq!(sources_of(dir.path(), "box.scdwg"), ["parts/old/lid.solidcraft", "asm/box.solidcraft"]);
+    // The sheets still point at their sources by id.
+    let doc: serde_json::Value = serde_json::from_slice(&fs::read(dir.path().join("box.scdwg")).unwrap()).unwrap();
+    assert_eq!(doc["sheets"][0]["documents"]["source"], "0lid000000000");
+    assert!(vault.scan().unwrap().into_iter().all(|e| e.status == Status::Current));
+}
+
+#[test]
+fn releasing_a_drawing_writes_its_revision_into_its_properties() {
+    let (dir, mut vault) = vault_with_drawing();
+    assert_eq!(vault.release("drawings/box.scdwg", "").unwrap().revision, "A");
+    let doc: serde_json::Value = serde_json::from_slice(&fs::read(dir.path().join("drawings/box.scdwg")).unwrap()).unwrap();
+    assert_eq!(doc["properties"], serde_json::json!({"part_number": "DWG-1", "revision": "A"}));
+    assert!(doc.get("metadata").is_none(), "a drawing has no `metadata`: SolidCraft would refuse it");
+}
+
+/// A vault holding the designs SolidCraft 0.41 saved (scformat's `tests/fixtures/sc041`), checked in.
+fn solidcraft_041_vault() -> (tempfile::TempDir, Vault) {
+    let dir = tempfile::tempdir().unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scformat/tests/fixtures/sc041");
+    for file in ["parts/plate.sc", "parts/bracket.sc", "asm/pair.sc", "asm/bench.sc"] {
+        let to = dir.path().join(file);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(fixtures.join(file), to).unwrap();
+    }
+    let mut vault = Vault::init(dir.path()).unwrap();
+    for e in vault.scan().unwrap() {
+        vault.check_in(&e.path, "v1").unwrap();
+    }
+    (dir, vault)
+}
+
+/// Each link's fingerprint, and whether it is the linked file's own (SolidCraft: not changed).
+fn fingerprints(dir: &Path, path: &str) -> Vec<(String, bool)> {
+    let file = dir.join(path);
+    let info = scformat::read_file(&file).unwrap();
+    info.links
+        .into_iter()
+        .map(|l| {
+            let target = fs::read(file.parent().unwrap().join(&l.path)).unwrap();
+            let current = l.file_sha256.as_deref() == Some(vault::hash(&target).as_str());
+            (l.path, current)
+        })
+        .collect()
+}
+
+#[test]
+fn solidcraft_041_links_start_up_to_date() {
+    let (dir, _vault) = solidcraft_041_vault();
+    assert_eq!(fingerprints(dir.path(), "asm/bench.sc"), [("../parts/plate.sc".into(), true), ("pair.sc".into(), true)]);
+    assert_eq!(fingerprints(dir.path(), "asm/pair.sc"), [("../parts/bracket.sc".into(), true)]);
+}
+
+#[test]
+fn editing_a_parts_properties_brings_the_assemblies_fingerprints_up_to_date() {
+    let (dir, mut vault) = solidcraft_041_vault();
+    vault.release("asm/bench.sc", "").unwrap();
+    let before = scformat::read_document(&fs::read(dir.path().join("asm/bench.sc")).unwrap()).unwrap();
+    vault.edit_properties("parts/plate.sc", None, &[("description", Some("Base plate, 5 mm"))]).unwrap();
+    let updates = vault.take_link_updates();
+    // v2 is the release, which wrote revision A into it.
+    assert_eq!(updates, [vault::LinkUpdate { path: "asm/bench.sc".into(), version: Some(3) }]);
+    assert!(vault.take_link_updates().is_empty(), "taken");
+    assert_eq!(fingerprints(dir.path(), "asm/bench.sc"), [("../parts/plate.sc".into(), true), ("pair.sc".into(), true)]);
+    let history = vault.history("asm/bench.sc").unwrap();
+    assert_eq!(history[0].comment, "Link to parts/plate.sc brought up to date (only its properties changed)");
+    assert_eq!(vault.lifecycle("asm/bench.sc").unwrap().state, vault::State::Released, "bookkeeping keeps the release");
+    // Only the fingerprint changed in the assembly.
+    let mut after = scformat::read_document(&fs::read(dir.path().join("asm/bench.sc")).unwrap()).unwrap();
+    after["links"]["1"]["file_sha256"] = before["links"]["1"]["file_sha256"].clone();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn releasing_a_part_brings_fingerprints_up_to_date_through_sub_assemblies() {
+    let (dir, mut vault) = solidcraft_041_vault();
+    // The bracket says revision A already: releasing B writes it.
+    vault.release_as("parts/bracket.sc", "B", "").unwrap();
+    let mut updated: Vec<String> = vault.take_link_updates().into_iter().map(|u| u.path).collect();
+    updated.sort();
+    assert_eq!(updated, ["asm/bench.sc", "asm/pair.sc"]);
+    assert_eq!(fingerprints(dir.path(), "asm/pair.sc"), [("../parts/bracket.sc".into(), true)]);
+    assert_eq!(fingerprints(dir.path(), "asm/bench.sc"), [("../parts/plate.sc".into(), true), ("pair.sc".into(), true)]);
+    assert!(vault.scan().unwrap().into_iter().all(|e| e.status == Status::Current));
+}
+
+#[test]
+fn a_move_brings_the_fingerprints_of_the_rewritten_designs_up_to_date() {
+    let (dir, mut vault) = solidcraft_041_vault();
+    let report = vault.rename("parts/bracket.sc", "parts/old/bracket.sc").unwrap();
+    let mut updated: Vec<&str> = report.updated.iter().map(|u| u.path.as_str()).collect();
+    updated.sort();
+    assert_eq!(updated, ["asm/bench.sc", "asm/pair.sc"]);
+    assert_eq!(fingerprints(dir.path(), "asm/pair.sc"), [("../parts/old/bracket.sc".into(), true)]);
+    assert_eq!(fingerprints(dir.path(), "asm/bench.sc"), [("../parts/plate.sc".into(), true), ("pair.sc".into(), true)]);
+}
+
+#[test]
+fn a_link_that_shows_a_real_change_keeps_showing_it() {
+    let (dir, mut vault) = solidcraft_041_vault();
+    // Changed outside the PDM (in SolidCraft, say): the bench's link shows the change.
+    let plate = dir.path().join("parts/plate.sc");
+    let changed = scformat::edit_document(&fs::read(&plate).unwrap(), |doc| doc["features"][0]["length"] = "70".into()).unwrap();
+    fs::write(&plate, changed).unwrap();
+    vault.check_in("parts/plate.sc", "longer").unwrap();
+    vault.edit_properties("parts/plate.sc", None, &[("revision", Some("B"))]).unwrap();
+    assert!(vault.take_link_updates().is_empty());
+    assert_eq!(fingerprints(dir.path(), "asm/bench.sc")[0], ("../parts/plate.sc".into(), false));
+}
+
+#[test]
+fn an_assembly_checked_out_by_someone_is_left_alone() {
+    let (dir, mut vault) = solidcraft_041_vault();
+    vault.lock("asm/bench.sc", "alice").unwrap();
+    let before = fs::read(dir.path().join("asm/bench.sc")).unwrap();
+    vault.edit_properties("parts/plate.sc", None, &[("description", Some("Base plate, 5 mm"))]).unwrap();
+    assert!(vault.take_link_updates().is_empty());
+    assert_eq!(fs::read(dir.path().join("asm/bench.sc")).unwrap(), before);
+}

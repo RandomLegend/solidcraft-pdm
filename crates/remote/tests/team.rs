@@ -369,3 +369,57 @@ fn a_changed_copy_of_a_deleted_design_stays() {
 fn status_of(ws: &mut Workspace, path: &str) -> RemoteStatus {
     status(ws, path)
 }
+
+/// Anna adds the designs SolidCraft 0.41 saved (scformat's `tests/fixtures/sc041`).
+fn add_solidcraft_041(t: &mut Team) {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scformat/tests/fixtures/sc041");
+    for file in ["parts/plate.sc", "parts/bracket.sc", "asm/pair.sc", "asm/bench.sc"] {
+        let to = t.anna.absolute(file);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(fixtures.join(file), &to).unwrap();
+        t.anna.add(file, "From SolidCraft 0.41").unwrap();
+    }
+}
+
+/// Whether `assembly`'s link to `part` records the part's fingerprint as it is in the workspace.
+fn link_current(ws: &Workspace, assembly: &str, part: &str) -> bool {
+    let info = scformat::read_file(ws.absolute(assembly)).unwrap();
+    let digest = vault::hash(&fs::read(ws.absolute(part)).unwrap());
+    let name = part.rsplit('/').next().unwrap();
+    info.links.iter().any(|l| l.path.ends_with(name) && l.file_sha256.as_deref() == Some(digest.as_str()))
+}
+
+#[test]
+fn a_properties_edit_on_the_server_brings_assemblies_fingerprints_up_to_date() {
+    let mut t = team();
+    add_solidcraft_041(&mut t);
+    let edit = |description: &str| Action::Properties {
+        path: "parts/plate.sc".into(),
+        name: None,
+        properties: vec![("description".into(), Some(description.into()))],
+        comment: "Thicker".into(),
+    };
+    let done = t.anna.act_on_design("parts/plate.sc", edit("Base plate, 5 mm")).unwrap();
+    assert_eq!(done.updated, ["asm/bench.sc"]);
+    assert!(link_current(&t.anna, "asm/bench.sc", "parts/plate.sc"), "the new assembly is fetched");
+    assert_eq!(status(&mut t.anna, "asm/bench.sc"), RemoteStatus::UpToDate);
+
+    // An assembly someone has checked out is left as it is.
+    t.ben.get("asm/bench.sc").unwrap();
+    t.ben.checkout("asm/bench.sc").unwrap();
+    let done = t.anna.act_on_design("parts/plate.sc", edit("Base plate, 6 mm")).unwrap();
+    assert!(done.updated.is_empty());
+    assert!(!link_current(&t.anna, "asm/bench.sc", "parts/plate.sc"));
+}
+
+#[test]
+fn a_release_on_the_server_brings_fingerprints_up_to_date_through_sub_assemblies() {
+    let mut t = team();
+    add_solidcraft_041(&mut t);
+    let action = Action::Release { path: "parts/bracket.sc".into(), revision: "B".into(), note: String::new() };
+    let mut done = t.anna.act_on_design("parts/bracket.sc", action).unwrap();
+    done.updated.sort();
+    assert_eq!(done.updated, ["asm/bench.sc", "asm/pair.sc"]);
+    assert!(link_current(&t.anna, "asm/pair.sc", "parts/bracket.sc"));
+    assert!(link_current(&t.anna, "asm/bench.sc", "asm/pair.sc"));
+}

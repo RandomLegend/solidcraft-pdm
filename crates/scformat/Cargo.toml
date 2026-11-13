@@ -1,6 +1,6 @@
 [package]
 name = "scformat"
-description = "SolidCraft design files (.solidcraft) for the PDM: reads properties, links and thumbnail; writes new empty designs"
+description = "SolidCraft design and drawing files (.sc, .solidcraft, .scdwg) for the PDM: reads properties, links, placements and thumbnail; edits documents; writes new empty designs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,3 +14,4 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+sha2 = { workspace = true }
