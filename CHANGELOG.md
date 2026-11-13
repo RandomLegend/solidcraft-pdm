@@ -3,7 +3,10 @@
 The notes of each version become its GitLab release notes: the release job takes the section
 whose heading starts with `## <version>`.
 
-## Unreleased
+## 0.41.0 — 2026-11-13
+
+The PDM's version now follows SolidCraft's: 0.41 is the release made for SolidCraft 0.41, and
+the next ones keep that numbering (0.2.7 was the one before).
 
 ### App and server
 

@@ -171,8 +171,10 @@ packaging/linux/build-appimage.sh             # dist/SolidCraft-PDM-<version>-x8
 ## Releasing
 
 1. Set the version in `Cargo.toml` (`[workspace.package]`) and add its section to
-   [CHANGELOG.md](CHANGELOG.md) (`## 0.2.0 — date`).
-2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+   [CHANGELOG.md](CHANGELOG.md) (`## 0.41.0 — date`). The version follows SolidCraft's: a
+   release made for SolidCraft 0.41 is 0.41.0, a fix for it 0.41.1, and one for SolidCraft
+   0.42 is 0.42.0.
+2. Commit, then tag and push: `git tag v0.41.0 && git push origin v0.41.0`.
 
 CI then builds the AppImage and the server (program and Docker image), and publishes a
 release with the changelog section as its notes and the files with their `SHA256SUMS` (and the
